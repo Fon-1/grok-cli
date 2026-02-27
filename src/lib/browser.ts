@@ -822,11 +822,11 @@ async function triggerReadAloud(
     // Thay vào đó hướng dẫn dùng xAI TTS API nếu có
     const note = [
       'NOTE: grok.com web does not support audio file export.',
-      '',
-      'To generate an MP3 from this text, use:',
-      '  1. xAI Voice API (if you have API key): https://x.ai/api',
-      '  2. macOS: say -o output.aiff "' + responseText.slice(0, 50) + '..."',
-      '  3. Windows: Use PowerShell -Command "Add-Type -AssemblyName System.Speech; ...',
+      'The response text has been saved below.',
+      'Use any local TTS tool to convert to audio:',
+      '  macOS:   say -o output.aiff "text..."  OR  say -f this-file.txt',
+      '  Windows: PowerShell: Add-Type -AssemblyName System.Speech; ...',
+      '  Linux:   espeak-ng -f this-file.txt -w output.wav',
       '',
       'Response text:',
       '',
