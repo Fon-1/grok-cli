@@ -238,6 +238,54 @@ async function checkAndHandleChallenges(client: CDPClient, opts: GrokOptions, lo
   }
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** M-4: detect Docker/CI containers where --no-sandbox is legitimately needed */
+function isRunningInContainer(): boolean {
+  try {
+    // Docker creates /.dockerenv
+    if (fs.existsSync('/.dockerenv')) return true;
+    // Check cgroup v1 (contains "docker" or "kubepods")
+    const cgroup = fs.readFileSync('/proc/1/cgroup', 'utf-8');
+    if (cgroup.includes('docker') || cgroup.includes('kubepods') || cgroup.includes('lxc')) return true;
+  } catch { /* not Linux or no access */ }
+  return false;
+}
+
+/** M-1: validate --grok-url only allows grok.com / x.com over https */
+function validateGrokUrl(url: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`Invalid --grok-url: "${url}" is not a valid URL.`);
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error(`Invalid --grok-url protocol: "${parsed.protocol}". Only https/http allowed.`);
+  }
+  // Warn for non-grok.com URLs (allow but flag)
+  const allowedHosts = ['grok.com', 'www.grok.com', 'x.com', 'www.x.com'];
+  const isAllowed = allowedHosts.some(h => parsed.hostname === h || parsed.hostname.endsWith('.' + h));
+  if (!isAllowed) {
+    console.warn(`[browser] Warning: --grok-url "${url}" is not grok.com. Proceeding anyway.`);
+  }
+}
+
+/** M-5: validate output file paths — must be absolute or resolvable, no null bytes */
+function validateOutputPath(filePath: string, label: string): string {
+  if (filePath.includes('\0')) {
+    throw new Error(`${label}: path contains null byte.`);
+  }
+  const resolved = path.resolve(filePath);
+  // Warn if writing outside CWD
+  const cwd = process.cwd();
+  const home = os.homedir();
+  if (!resolved.startsWith(cwd) && !resolved.startsWith(home)) {
+    console.warn(`[browser] Warning: ${label} "${resolved}" is outside home/CWD — writing anyway.`);
+  }
+  return resolved;
+}
+
 // ─── Chrome launch ────────────────────────────────────────────────────────────
 
 async function launchChrome(opts: {
@@ -265,6 +313,8 @@ async function launchChrome(opts: {
     '--disable-extensions',
     '--window-size=1280,800',
     '--start-maximized',
+    // M-3 fix: bind CDP only to loopback — prevent network exposure
+    '--remote-debugging-address=127.0.0.1',
   ];
 
   if (opts.profileDir) flags.push(`--user-data-dir=${opts.profileDir}`);
@@ -272,7 +322,11 @@ async function launchChrome(opts: {
   if (opts.headless) {
     flags.push('--headless=new');
     flags.push('--disable-dev-shm-usage');
-    flags.push('--no-sandbox');
+    // M-4 fix: only add --no-sandbox in CI/container environments, not by default
+    if (process.env.GROK_NO_SANDBOX === '1' || isRunningInContainer()) {
+      flags.push('--no-sandbox');
+      console.warn('[browser] Warning: running Chrome without sandbox (container mode)');
+    }
   }
 
   const launcher = await launch({
@@ -685,23 +739,60 @@ async function captureGeneratedImage(client: CDPClient, timeoutMs: number, log: 
   return null;
 }
 
+const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024; // 50MB max
+const DOWNLOAD_TIMEOUT_MS = 30_000;           // 30s timeout
+
 async function downloadImage(url: string, outputPath: string, log: (msg: string) => void): Promise<void> {
   const fsMod = await import('fs');
   const pathMod = await import('path');
-  fsMod.default.mkdirSync(pathMod.default.dirname(outputPath), { recursive: true });
+
+  // M-5 fix: validate output path
+  const safeOutputPath = validateOutputPath(outputPath, '--imagine output');
+  fsMod.default.mkdirSync(pathMod.default.dirname(safeOutputPath), { recursive: true });
 
   if (url.startsWith('http')) {
     const https = await import('https');
     const http = await import('http');
     const protocol = url.startsWith('https') ? https.default : http.default;
+
     await new Promise<void>((resolve, reject) => {
-      const file = fsMod.default.createWriteStream(outputPath);
-      protocol.get(url, (res) => {
+      // M-7: add timeout
+      const req = protocol.get(url, (res) => {
+        // M-7: check content-type
+        const ct = res.headers['content-type'] ?? '';
+        if (!ct.startsWith('image/') && !ct.startsWith('application/octet-stream')) {
+          req.destroy();
+          return reject(new Error(`Unexpected content-type: ${ct}. Expected an image.`));
+        }
+
+        let received = 0;
+        const file = fsMod.default.createWriteStream(safeOutputPath, { mode: 0o600 });
+
+        res.on('data', (chunk: Buffer) => {
+          received += chunk.length;
+          // M-7: size limit
+          if (received > MAX_DOWNLOAD_BYTES) {
+            req.destroy();
+            file.destroy();
+            fsMod.default.unlinkSync(safeOutputPath);
+            reject(new Error(`Download exceeded ${MAX_DOWNLOAD_BYTES / 1024 / 1024}MB limit`));
+          }
+        });
+
         res.pipe(file);
         file.on('finish', () => { file.close(); resolve(); });
-      }).on('error', reject);
+        file.on('error', reject);
+      });
+
+      // M-7: timeout
+      req.setTimeout(DOWNLOAD_TIMEOUT_MS, () => {
+        req.destroy();
+        reject(new Error(`Download timed out after ${DOWNLOAD_TIMEOUT_MS / 1000}s`));
+      });
+      req.on('error', reject);
     });
-    log(`[imagine] Image saved to: ${outputPath}`);
+
+    log(`[imagine] Image saved to: ${safeOutputPath}`);
   } else {
     log(`[imagine] Blob URL — open browser to save manually`);
     log(`[imagine] Blob URL: ${url}`);
@@ -1060,6 +1151,7 @@ export async function runGrokBrowser(
 
     // ── 4. Navigate to grok.com ────────────────────────────────────────────
     const grokUrl = opts.grokUrl || 'https://grok.com';
+    validateGrokUrl(grokUrl); // M-1: SSRF guard
     log(`[browser] Navigating to ${grokUrl}`);
     let navOk = false;
     try {

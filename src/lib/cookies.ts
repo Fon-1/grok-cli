@@ -31,8 +31,14 @@ export function parseCookiePayload(raw: string): CookieParam[] {
       // ignore
     }
   }
-  const parsed = JSON.parse(json);
-  return Array.isArray(parsed) ? parsed : [parsed];
+  // M-6 fix: proper error handling around JSON.parse
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch (err) {
+    throw new Error(`Invalid cookie JSON: ${(err as Error).message}. Expected a CookieParam[] array.`);
+  }
+  return Array.isArray(parsed) ? parsed as CookieParam[] : [parsed as CookieParam];
 }
 
 export function loadCookiesFromFile(filePath: string): CookieParam[] {
@@ -128,13 +134,22 @@ export async function readChromeCookies(
   }
 
   // We need to copy the DB first (Chrome may have it locked)
-  const tmpDir = os.tmpdir();
-  const tmpCookies = path.join(tmpDir, `grok-cookies-${Date.now()}.db`);
+  // H-3 fix: use mkdtempSync for unpredictable temp directory (prevents TOCTOU symlink attack)
+  let tmpDirCookies: string;
+  let tmpCookies: string;
+  try {
+    tmpDirCookies = fs.mkdtempSync(path.join(os.tmpdir(), 'grok-cookies-'));
+    tmpCookies = path.join(tmpDirCookies, 'cookies.db');
+  } catch (err) {
+    if (verbose) console.warn(`[cookies] Could not create temp dir: ${(err as Error).message}`);
+    return null;
+  }
 
   try {
     fs.copyFileSync(cookiePath, tmpCookies);
   } catch (err) {
     if (verbose) console.warn(`[cookies] Could not copy cookie DB: ${(err as Error).message}`);
+    try { fs.rmSync(tmpDirCookies!, { recursive: true, force: true }); } catch { /* ignore */ }
     return null;
   }
 
@@ -215,7 +230,8 @@ export async function readChromeCookies(
     return cookies;
   } finally {
     try { db.close(); } catch { /* ignore */ }
-    try { fs.unlinkSync(tmpCookies); } catch { /* ignore */ }
+    // H-3 fix: clean up the entire temp directory, not just the file
+    try { fs.rmSync(tmpDirCookies, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 }
 

@@ -41,6 +41,17 @@ import type { GrokOptions } from '../lib/types.js';
 
 const VERSION = '0.1.0';
 
+// L-5 fix: safe parseInt that falls back to default on NaN/negative
+function parsePositiveInt(value: string | undefined, defaultVal: number): number {
+  if (!value) return defaultVal;
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n) || n <= 0) {
+    console.warn(`Warning: invalid timeout "${value}", using default ${defaultVal}ms`);
+    return defaultVal;
+  }
+  return n;
+}
+
 // ─── Program ─────────────────────────────────────────────────────────────────
 
 const program = new Command();
@@ -116,8 +127,9 @@ program
       inlineCookies: opts.inlineCookies,
       inlineCookiesFile: opts.inlineCookiesFile,
       grokUrl: opts.grokUrl ?? 'https://grok.com',
-      browserTimeout: parseInt(opts.browserTimeout ?? '120000', 10),
-      responseTimeout: parseInt(opts.responseTimeout ?? '300000', 10),
+      // L-5 fix: validate timeout values, fall back to defaults if NaN/invalid
+      browserTimeout: parsePositiveInt(opts.browserTimeout, 120_000),
+      responseTimeout: parsePositiveInt(opts.responseTimeout, 300_000),
       manualLogin: opts.manualLogin ?? false,
       remoteChrome: opts.remoteChrome,
       writeOutput: opts.writeOutput,

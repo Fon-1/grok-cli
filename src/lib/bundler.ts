@@ -48,6 +48,38 @@ function detectLanguage(filePath: string): string {
   return langMap[ext] || ext || 'text';
 }
 
+// ─── H-2 fix: validate patterns don't escape CWD ─────────────────────────────
+
+/**
+ * Warn if pattern looks like it could access sensitive files outside CWD.
+ * We allow absolute paths (user may intentionally pass /src/...) but warn loudly.
+ * The tool's threat model: user runs it themselves, so we warn, not hard-block.
+ */
+function warnIfSensitivePath(pattern: string): void {
+  const sensitive = [
+    /\/\.ssh\//i, /\\\.ssh\\/i,
+    /\/\.aws\//i, /\\\.aws\\/i,
+    /\/\.gnupg\//i,
+    /\/etc\//i,
+    /\/proc\//i,
+    /\/sys\//i,
+    /id_rsa/i, /id_ed25519/i,
+    /credentials/i,
+    /\.env$/i,
+    /private.*key/i,
+    /secret/i,
+  ];
+  for (const re of sensitive) {
+    if (re.test(pattern)) {
+      console.warn(
+        `\n  ⚠  Warning: file pattern may include sensitive data: ${pattern}\n` +
+        `     This content will be sent to grok.com. Press Ctrl+C to cancel.\n`
+      );
+      break;
+    }
+  }
+}
+
 export async function resolveFiles(patterns: string[]): Promise<string[]> {
   if (patterns.length === 0) return [];
 
@@ -58,6 +90,7 @@ export async function resolveFiles(patterns: string[]): Promise<string[]> {
     if (p.startsWith('!')) {
       excludePatterns.push(p.slice(1));
     } else {
+      warnIfSensitivePath(p);
       // If it's a directory, add **/* glob
       try {
         const stat = fs.statSync(p);
@@ -67,7 +100,6 @@ export async function resolveFiles(patterns: string[]): Promise<string[]> {
           includePatterns.push(p);
         }
       } catch {
-        // Treat as glob pattern
         includePatterns.push(p);
       }
     }
@@ -80,7 +112,7 @@ export async function resolveFiles(patterns: string[]): Promise<string[]> {
     dot: false,
     onlyFiles: true,
     absolute: false,
-    followSymbolicLinks: false,
+    followSymbolicLinks: false, // already false — prevents symlink escapes
   });
 
   return files.sort();

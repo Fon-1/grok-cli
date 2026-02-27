@@ -34,7 +34,11 @@ export async function copyToClipboard(text: string): Promise<boolean> {
 }
 
 export function writeOutputFile(filePath: string, text: string) {
-  fs.writeFileSync(filePath, text, 'utf-8');
+  // M-5 fix: null byte check
+  if (filePath.includes('\0')) {
+    throw new Error(`Invalid output path: contains null byte.`);
+  }
+  fs.writeFileSync(filePath, text, { encoding: 'utf-8', mode: 0o600 });
   console.log(chalk.dim(`  Output written to: ${filePath}`));
 }
 
