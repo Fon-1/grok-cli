@@ -520,26 +520,47 @@ const SUBMIT_SELECTORS = [
 ];
 
 const RESPONSE_SELECTORS = [
+  // Grok-specific (inspect và update nếu DOM thay đổi)
   '[data-testid="grok-response-content"]',
   '[data-testid="responseText"]',
   '[data-testid="response-content"]',
-  '.response-content',
-  'article[data-testid*="response"]',
+  '[data-testid="message-content"]',
+  '[data-testid="assistant-message"]',
+  // Generic message containers
   '[data-message-role="assistant"]',
+  '[data-role="assistant"]',
+  '.response-content',
+  '.message-content',
+  // Article-based layouts
+  'article[data-testid*="response"]',
+  'article[data-testid*="message"]',
   '[role="article"]',
+  // Common AI chat patterns
+  '.prose',
+  '.markdown-body',
+  '[class*="message"][class*="assistant"]',
+  '[class*="response"][class*="content"]',
+  '[class*="assistant"][class*="message"]',
 ];
 
 // Selectors indicating Grok is still generating
 const LOADING_SELECTORS = [
   '[data-testid="grok-streaming-indicator"]',
   '[data-testid="loading"]',
+  '[data-testid*="loading"]',
+  '[data-testid*="thinking"]',
+  '[data-testid*="generating"]',
   '[aria-label*="Loading"]',
   '[aria-label*="Generating"]',
   '[aria-label*="Thinking"]',
+  '[aria-label*="Stop"]',          // "Stop generating" button
+  'button[aria-label*="Stop"]',
   'svg[class*="animate-spin"]',
   'svg[class*="spinner"]',
   '.loading-indicator',
-  '[data-testid*="loading"]',
+  '[class*="streaming"]',
+  '[class*="thinking"]',
+  '[class*="generating"]',
 ];
 
 async function findElement(client: CDPClient, selectors: string[]): Promise<string | null> {
@@ -626,90 +647,167 @@ async function captureResponse(
   const deadline = Date.now() + timeoutMs;
   let lastText = '';
   let stableCount = 0;
-  const STABLE_NEEDED = 6; // 6 × 500ms = 3s stable = response complete
+  const STABLE_NEEDED = 6; // 6 × 500ms = 3s stable = done
 
   if (verbose) console.log('[browser] Polling for response...');
 
+  // Track which selector matched — for debug
+  let matchedSelector = '';
+
   while (Date.now() < deadline) {
     try {
+      // ── Strategy 1: specific selectors ──────────────────────────────────
       const result = await Runtime.evaluate({
         expression: `
           (function() {
+            // Try known selectors first
             const sels = ${JSON.stringify(RESPONSE_SELECTORS)};
             for (const sel of sels) {
-              const els = document.querySelectorAll(sel);
-              if (els.length > 0) {
-                const last = els[els.length - 1];
-                return (last.innerText || last.textContent || '').trim();
+              try {
+                const els = document.querySelectorAll(sel);
+                if (els.length > 0) {
+                  const last = els[els.length - 1];
+                  const text = (last.innerText || last.textContent || '').trim();
+                  if (text.length > 20) return { text, sel };
+                }
+              } catch(e) {}
+            }
+
+            // ── Strategy 2: find biggest text block that appeared after send ──
+            // Look for any element with significant text that is NOT the input area
+            const allDivs = document.querySelectorAll('div, section, main');
+            let best = { text: '', sel: '', len: 0 };
+            for (const el of allDivs) {
+              // Skip input areas
+              if (el.querySelector('textarea, [contenteditable]')) continue;
+              if (el.closest('textarea, [contenteditable], form, header, nav, footer')) continue;
+              const text = (el.innerText || '').trim();
+              if (text.length > best.len && text.length > 50) {
+                best = { text, sel: el.tagName + '.' + el.className.slice(0,40), len: text.length };
               }
             }
-            // Fallback: last article / role=article
-            const arts = document.querySelectorAll('article, [role="article"]');
-            if (arts.length > 0) {
-              const last = arts[arts.length - 1];
-              return (last.innerText || last.textContent || '').trim();
-            }
+            if (best.len > 50) return best;
+
             return null;
           })()
         `,
         returnByValue: true,
       });
 
-      const currentText = (result.result?.value as string | null) ?? '';
+      const val = result.result?.value as { text: string; sel: string } | null;
+      const currentText = val?.text ?? '';
+      if (val?.sel && val.sel !== matchedSelector) {
+        matchedSelector = val.sel;
+        if (verbose) console.log(`[browser] Matched selector: ${matchedSelector}`);
+      }
 
-      // Check if still loading
+      // ── Check loading state ──────────────────────────────────────────────
       const loadResult = await Runtime.evaluate({
         expression: `
           (function() {
-            const sels = ${JSON.stringify(LOADING_SELECTORS)};
-            return sels.some(s => document.querySelector(s) !== null);
+            // Check known loading selectors
+            const loadSels = ${JSON.stringify(LOADING_SELECTORS)};
+            if (loadSels.some(s => { try { return document.querySelector(s) !== null; } catch { return false; } })) {
+              return true;
+            }
+            // Check if submit/send button is disabled (= still generating)
+            const submitSels = ${JSON.stringify(SUBMIT_SELECTORS)};
+            for (const s of submitSels) {
+              try {
+                const btn = document.querySelector(s);
+                if (btn && (btn.disabled || btn.getAttribute('aria-disabled') === 'true')) return true;
+              } catch {}
+            }
+            return false;
           })()
         `,
         returnByValue: true,
       });
       const isLoading = loadResult.result?.value === true;
 
-      if (currentText.length > 30) {
+      // Progress log
+      if (verbose && currentText.length > 0 && currentText.length !== lastText.length) {
+        process.stdout.write(`\r[browser] ${currentText.length} chars received...`);
+      }
+
+      if (currentText.length > 20) {
         if (currentText === lastText && !isLoading) {
           stableCount++;
+          if (verbose) process.stdout.write(`\r[browser] Stable ${stableCount}/${STABLE_NEEDED}...`);
           if (stableCount >= STABLE_NEEDED) {
-            if (verbose) console.log(`[browser] Response stable (${currentText.length} chars)`);
+            if (verbose) console.log(`\n[browser] Response complete (${currentText.length} chars)`);
             return currentText;
           }
         } else {
-          if (currentText !== lastText) stableCount = 0;
+          stableCount = 0;
           lastText = currentText;
-          if (verbose && currentText.length % 300 < 30) {
-            console.log(`[browser] Receiving... ${currentText.length} chars`);
+        }
+      } else if (currentText.length === 0 && lastText.length === 0) {
+        // Nothing yet — check for mid-session captcha
+        const midChallenge = await detectChallenge(client);
+        if (midChallenge !== 'none') {
+          console.log(`\n  ⏸  Challenge appeared: ${midChallenge}`);
+          await promptUser('  Press Enter after solving: ');
+          await sleep(2000);
+        }
+
+        // Dump DOM hint every 10s in verbose mode to help debug selector issues
+        if (verbose) {
+          const elapsed = timeoutMs - (deadline - Date.now());
+          if (elapsed > 0 && Math.round(elapsed / 1000) % 10 === 0) {
+            const domHint = await Runtime.evaluate({
+              expression: `
+                (function() {
+                  // Return a summary of notable elements to help debug
+                  const result = [];
+                  const interesting = document.querySelectorAll('[class*="message"],[class*="response"],[class*="chat"],[class*="answer"],[role="article"],[role="main"],article,main');
+                  for (const el of interesting) {
+                    const text = (el.innerText || '').trim().slice(0, 60);
+                    if (text.length > 5) {
+                      result.push(el.tagName + '[' + (el.getAttribute('class') || '').slice(0,50) + '] = "' + text + '"');
+                    }
+                  }
+                  return result.slice(0, 8).join('\\n');
+                })()
+              `,
+              returnByValue: true,
+            });
+            if (domHint.result?.value) {
+              console.log('\n[browser] DOM hint:\n' + domHint.result.value);
+            }
           }
         }
       }
-
-      // Mid-response: check if a new captcha appeared (rare but possible)
-      if (stableCount === 0 && currentText.length === 0) {
-        const midChallenge = await detectChallenge(client);
-        if (midChallenge !== 'none') {
-          console.log(`\n  ⏸  Challenge appeared mid-response: ${midChallenge}`);
-          // Re-use handleChallenge with a dummy opts
-          const { Runtime: _r, ...rest } = client;
-          // Just pause and wait for user
-          await promptUser('  Press Enter after solving the challenge: ');
-          await sleep(2000);
-        }
-      }
     } catch (err) {
-      if (verbose) console.warn(`[browser] Capture poll error: ${(err as Error).message}`);
+      if (verbose) console.warn(`\n[browser] Poll error: ${(err as Error).message}`);
     }
 
     await sleep(500);
   }
 
   if (lastText) {
-    console.warn('[browser] Timed out waiting for stable response — returning partial');
+    console.warn('\n[browser] Timed out — returning partial response');
     return lastText;
   }
 
-  throw new Error(`Response capture timed out after ${timeoutMs}ms`);
+  // Last resort: dump DOM for debugging
+  try {
+    const dump = await Runtime.evaluate({
+      expression: `document.body?.innerText?.slice(0, 2000) ?? ''`,
+      returnByValue: true,
+    });
+    const bodyText = (dump.result?.value as string) ?? '';
+    if (bodyText.length > 100) {
+      console.warn('[browser] No response captured. Page body preview:');
+      console.warn(bodyText.slice(0, 500));
+    }
+  } catch { /* ignore */ }
+
+  throw new Error(
+    `Response capture timed out after ${timeoutMs}ms.\n` +
+    `  Tip: run with -v (--verbose) to see DOM hints and matched selectors.\n` +
+    `  Or file a bug at https://github.com/Fon-1/grok-cli/issues`
+  );
 }
 
 // ─── Main entry ───────────────────────────────────────────────────────────────
