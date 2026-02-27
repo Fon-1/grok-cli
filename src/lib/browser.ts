@@ -697,68 +697,246 @@ async function downloadImage(url: string, outputPath: string, log: (msg: string)
 
 // ─── Read Aloud ───────────────────────────────────────────────────────────────
 
-async function triggerReadAloud(client: CDPClient, outputPath: string, log: (msg: string) => void): Promise<void> {
+/**
+ * Read Aloud flow:
+ *
+ * Grok.com dùng một trong 2 cách để phát audio:
+ *   A) Fetch audio file (MP3/WAV) qua HTTP → inject vào <audio> element
+ *   B) Web Speech API (speechSynthesis) — hoàn toàn browser-side, không có network request
+ *
+ * Strategy:
+ *   1. Intercept Network requests để bắt audio URL (cách A)
+ *   2. Poll DOM để tìm <audio> element xuất hiện (cách A + B)
+ *   3. Nếu bắt được URL → download hoặc lưu URL
+ *   4. Nếu chỉ có <audio> element với blob: src → lưu URL blob
+ *   5. Nếu dùng speechSynthesis → không capture được audio data,
+ *      chỉ có thể trigger và để Chrome tự đọc
+ */
+async function triggerReadAloud(
+  client: CDPClient,
+  outputPath: string,
+  log: (msg: string) => void,
+): Promise<void> {
   const { Runtime, Network } = client;
+
   const READ_ALOUD_SELECTORS = [
-    'button[aria-label*="Read aloud"]',
-    'button[aria-label*="Read Aloud"]',
+    // Theo data-testid (ổn định nhất)
+    'button[data-testid="read-aloud-button"]',
     'button[data-testid*="read-aloud"]',
+    'button[data-testid*="readAloud"]',
     'button[data-testid*="tts"]',
+    'button[data-testid*="speak"]',
+    // Theo aria-label
+    'button[aria-label="Read aloud"]',
+    'button[aria-label="Read Aloud"]',
+    'button[aria-label*="Read aloud"]',
+    'button[aria-label*="Speak"]',
+    'button[aria-label*="Listen"]',
+    // Theo title
+    'button[title="Read aloud"]',
     'button[title*="Read aloud"]',
-    '[class*="read-aloud"]',
-    '[class*="tts"] button',
+    // Theo class
+    '[class*="read-aloud"] button',
+    '[class*="readAloud"] button',
+    '[class*="tts-button"]',
+    '[class*="speak-button"]',
+    // Fallback icon button trong message actions
+    '[data-testid="message-actions"] button:last-child',
   ];
 
-  log('[read-aloud] Looking for Read Aloud button...');
-  let audioUrl: string | null = null;
+  log('[read-aloud] Setting up network intercept...');
 
-  const requestHandler = (params: any) => {
+  // ── 1. Intercept network requests để bắt audio URL ──────────────────────
+  let capturedAudioUrl: string | null = null;
+
+  // Dùng CDP event đúng cách với chrome-remote-interface
+  Network.requestWillBeSent((params: any) => {
     const url: string = params.request?.url ?? '';
-    if (url.includes('.mp3') || url.includes('audio') || url.includes('tts') || url.includes('speech')) {
-      audioUrl = url;
-      log(`[read-aloud] Audio URL intercepted: ${url.slice(0, 80)}`);
+    const resourceType: string = params.type ?? '';
+    // Bắt audio/media requests
+    if (
+      resourceType === 'Media' ||
+      resourceType === 'XHR' ||
+      resourceType === 'Fetch' ||
+      url.includes('.mp3') ||
+      url.includes('.wav') ||
+      url.includes('.ogg') ||
+      url.includes('audio') ||
+      url.includes('/tts') ||
+      url.includes('/speech') ||
+      url.includes('/synthesize') ||
+      url.includes('text-to-speech')
+    ) {
+      if (!capturedAudioUrl) {
+        capturedAudioUrl = url;
+        log(`[read-aloud] Audio request intercepted: ${url.slice(0, 100)}`);
+      }
     }
-  };
-  Network.requestWillBeSent(requestHandler);
+  });
 
-  const result = await Runtime.evaluate({
+  // Enable Media domain để track audio elements
+  try {
+    await client.Media?.enable?.();
+  } catch { /* Media domain optional */ }
+
+  // ── 2. Tìm và click nút Read Aloud ──────────────────────────────────────
+  log('[read-aloud] Looking for Read Aloud button...');
+
+  const clickResult = await Runtime.evaluate({
     expression: `
       (function() {
         const sels = ${JSON.stringify(READ_ALOUD_SELECTORS)};
+
+        // Thử trong last message trước
+        const articles = document.querySelectorAll('[role="article"], article, [data-testid*="message"]');
+        const lastArticle = articles[articles.length - 1];
+
         for (const sel of sels) {
           try {
-            const articles = document.querySelectorAll('[role="article"], article');
-            const last = articles[articles.length - 1];
-            const container = last || document;
-            const btn = container.querySelector(sel);
-            if (btn) { btn.click(); return sel; }
+            // Tìm trong last message
+            if (lastArticle) {
+              const btn = lastArticle.querySelector(sel);
+              if (btn && !btn.disabled) {
+                btn.click();
+                return { found: true, sel, scope: 'last-message' };
+              }
+            }
+            // Tìm trên toàn trang
+            const btn = document.querySelector(sel);
+            if (btn && !btn.disabled) {
+              btn.click();
+              return { found: true, sel, scope: 'document' };
+            }
           } catch {}
         }
-        return null;
+
+        // Debug: liệt kê các button trong last message
+        const buttons = lastArticle
+          ? Array.from(lastArticle.querySelectorAll('button')).map(b => ({
+              text: b.textContent?.trim().slice(0, 30),
+              label: b.getAttribute('aria-label'),
+              testid: b.getAttribute('data-testid'),
+              title: b.title,
+            }))
+          : [];
+
+        return { found: false, buttons };
       })()
     `,
     returnByValue: true,
   });
 
-  if (!result.result?.value) {
-    log('[read-aloud] Read Aloud button not found');
+  const clickData = clickResult.result?.value as any;
+
+  if (!clickData?.found) {
+    // Không tìm thấy button — log debug info
+    log('[read-aloud] Read Aloud button not found on this page.');
+    if (clickData?.buttons?.length > 0) {
+      log('[read-aloud] Buttons found in last message:');
+      for (const b of clickData.buttons) {
+        log(`  - text="${b.text}" aria-label="${b.label}" data-testid="${b.testid}"`);
+      }
+      log('[read-aloud] → Copy button info above and open an issue to update selectors.');
+    } else {
+      log('[read-aloud] No buttons found in last message — page may not have loaded fully.');
+    }
     return;
   }
 
-  log(`[read-aloud] Clicked Read Aloud, waiting for audio...`);
-  const deadline = Date.now() + 15_000;
-  while (!audioUrl && Date.now() < deadline) await sleep(500);
+  log(`[read-aloud] Clicked Read Aloud button (${clickData.sel}, scope: ${clickData.scope})`);
 
-  if (audioUrl) {
-    const fsMod = await import('fs');
-    if (outputPath.endsWith('.mp3') || outputPath.endsWith('.wav')) {
-      await downloadImage(audioUrl, outputPath, log);
+  // ── 3. Đợi audio bắt đầu phát (poll <audio> element + network) ──────────
+  log('[read-aloud] Waiting for audio to start...');
+  const deadline = Date.now() + 20_000;
+  let audioElementSrc: string | null = null;
+  let isPlaying = false;
+
+  while (Date.now() < deadline) {
+    await sleep(400);
+
+    // Check network đã bắt được URL chưa
+    if (capturedAudioUrl) break;
+
+    // Poll <audio> element trong DOM
+    const audioCheck = await Runtime.evaluate({
+      expression: `
+        (function() {
+          const audios = document.querySelectorAll('audio');
+          for (const a of audios) {
+            if (a.src && a.src !== '' && !a.src.startsWith('data:')) {
+              return { src: a.src, paused: a.paused, currentTime: a.currentTime };
+            }
+          }
+          // Check speechSynthesis
+          const synth = window.speechSynthesis;
+          if (synth && synth.speaking) return { src: null, speaking: true };
+          return null;
+        })()
+      `,
+      returnByValue: true,
+    });
+
+    const audioData = audioCheck.result?.value as any;
+    if (audioData) {
+      if (audioData.src) {
+        audioElementSrc = audioData.src;
+        isPlaying = !audioData.paused;
+        log(`[read-aloud] Audio element found: ${audioData.src.slice(0, 80)}`);
+        break;
+      }
+      if (audioData.speaking) {
+        log('[read-aloud] speechSynthesis is speaking (browser TTS — no audio file to capture)');
+        isPlaying = true;
+        break;
+      }
+    }
+  }
+
+  // ── 4. Xử lý kết quả ────────────────────────────────────────────────────
+  const fsMod = await import('fs');
+  const pathMod = await import('path');
+
+  const finalUrl = capturedAudioUrl ?? audioElementSrc;
+
+  if (finalUrl) {
+    fsMod.default.mkdirSync(pathMod.default.dirname(outputPath), { recursive: true });
+
+    if (finalUrl.startsWith('blob:')) {
+      // Blob URL — không download được từ Node, lưu URL để user dùng thủ công
+      fsMod.default.writeFileSync(outputPath, finalUrl, 'utf-8');
+      log(`[read-aloud] Blob audio URL saved to: ${outputPath}`);
+      log('[read-aloud] Note: Blob URLs expire — open in browser to play/download');
+
+    } else if (outputPath.endsWith('.mp3') || outputPath.endsWith('.wav') || outputPath.endsWith('.ogg')) {
+      // Download audio file
+      await downloadImage(finalUrl, outputPath, log);
+      log(`[read-aloud] Audio downloaded to: ${outputPath}`);
+
     } else {
-      fsMod.default.writeFileSync(outputPath, audioUrl, 'utf-8');
+      // Lưu URL vào text file
+      fsMod.default.writeFileSync(outputPath, finalUrl, 'utf-8');
       log(`[read-aloud] Audio URL saved to: ${outputPath}`);
     }
+
+  } else if (isPlaying) {
+    // speechSynthesis đang chạy — không có file để lưu
+    log('[read-aloud] Grok is reading aloud via browser speech synthesis.');
+    log('[read-aloud] This uses Web Speech API — no audio file is generated.');
+    log('[read-aloud] You can hear the audio directly in the browser window.');
+    // Lưu note vào file
+    fsMod.default.mkdirSync(pathMod.default.dirname(outputPath), { recursive: true });
+    fsMod.default.writeFileSync(
+      outputPath,
+      'Read Aloud triggered via Web Speech API (browser TTS)\nNo audio file available — listen in browser window.\n',
+      'utf-8',
+    );
+
   } else {
-    log('[read-aloud] No audio URL captured — may require premium or selector update');
+    log('[read-aloud] Audio did not start within 20s.');
+    log('[read-aloud] Possible reasons:');
+    log('  1. Read Aloud requires Grok Premium subscription');
+    log('  2. Button selector changed — run with -v and check DOM hint');
+    log('  3. Response was too short to trigger Read Aloud');
   }
 }
 
