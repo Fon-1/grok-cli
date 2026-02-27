@@ -150,12 +150,12 @@ const STEALTH_SCRIPT = `
 // ─── Challenge detection ───────────────────────────────────────────────────────
 
 type ChallengeKind =
-  | 'cloudflare-turnstile'   // CF Turnstile widget
-  | 'cloudflare-challenge'   // CF "Just a moment..." JS challenge page
-  | 'arkose-funcaptcha'      // Arkose / FunCaptcha (X.com login)
-  | 'recaptcha'              // reCAPTCHA v2/v3
-  | 'hcaptcha'               // hCaptcha
-  | 'login-wall'             // Redirected to x.com/login
+  | 'cloudflare-turnstile'
+  | 'cloudflare-challenge'
+  | 'arkose-funcaptcha'
+  | 'recaptcha'
+  | 'hcaptcha'
+  | 'login-wall'
   | 'none';
 
 async function detectChallenge(client: CDPClient): Promise<ChallengeKind> {
@@ -168,19 +168,14 @@ async function detectChallenge(client: CDPClient): Promise<ChallengeKind> {
           const title = document.title || '';
           const body = document.body?.innerText || '';
 
-          // Cloudflare "Just a moment..." interstitial
           if (title.includes('Just a moment') || body.includes('Checking your browser')) {
             return 'cloudflare-challenge';
           }
-
-          // Cloudflare Turnstile widget
           if (document.querySelector('iframe[src*="challenges.cloudflare.com"]') ||
               document.querySelector('[class*="cf-turnstile"]') ||
               document.querySelector('input[name="cf-turnstile-response"]')) {
             return 'cloudflare-turnstile';
           }
-
-          // Arkose FunCaptcha (used by X.com login)
           if (document.querySelector('iframe[src*="arkoselabs.com"]') ||
               document.querySelector('iframe[src*="funcaptcha.com"]') ||
               document.querySelector('#FunCaptcha') ||
@@ -188,26 +183,19 @@ async function detectChallenge(client: CDPClient): Promise<ChallengeKind> {
               document.querySelector('input[name="fc-token"]')) {
             return 'arkose-funcaptcha';
           }
-
-          // reCAPTCHA
           if (document.querySelector('iframe[src*="recaptcha"]') ||
               document.querySelector('.g-recaptcha') ||
               document.querySelector('[data-sitekey]')) {
             return 'recaptcha';
           }
-
-          // hCaptcha
           if (document.querySelector('iframe[src*="hcaptcha.com"]') ||
               document.querySelector('.h-captcha')) {
             return 'hcaptcha';
           }
-
-          // Redirected to login page
           if (url.includes('x.com/login') || url.includes('twitter.com/login') ||
               url.includes('/i/flow/login') || url.includes('grok.com/login')) {
             return 'login-wall';
           }
-
           return 'none';
         })()
       `,
@@ -219,15 +207,6 @@ async function detectChallenge(client: CDPClient): Promise<ChallengeKind> {
   }
 }
 
-/**
- * Handle any challenge that appears.
- *
- * Strategy:
- * - cloudflare-challenge: wait up to 30s for CF to auto-pass (works in non-headless + stealth)
- * - cloudflare-turnstile: same — Turnstile often passes automatically with a real browser
- * - arkose-funcaptcha / recaptcha / hcaptcha: pause, print instructions, wait for user
- * - login-wall: tell user to provide cookies or use --manual-login
- */
 async function handleChallenge(
   client: CDPClient,
   kind: ChallengeKind,
@@ -236,8 +215,6 @@ async function handleChallenge(
 ): Promise<void> {
   if (kind === 'none') return;
 
-  const { Runtime, Page } = client;
-
   switch (kind) {
     case 'cloudflare-challenge':
     case 'cloudflare-turnstile': {
@@ -245,19 +222,15 @@ async function handleChallenge(
       if (opts.headless) {
         console.warn(
           '\n  ⚠  Cloudflare challenge detected in headless mode.\n' +
-          '     Headless browsers are often blocked by Cloudflare.\n' +
           '     Restart without --headless to let Chrome solve it automatically.\n'
         );
       } else {
         log('[captcha] Waiting up to 30s for Cloudflare to auto-pass...');
       }
-
-      // Wait for challenge to resolve (URL changes away from challenge page)
       const resolved = await waitForChallengeGone(client, kind, 30_000);
       if (resolved) {
         log('[captcha] Cloudflare challenge passed ✓');
       } else {
-        // Non-headless: pause and let user handle it
         console.log(
           '\n  ⏸  Cloudflare challenge did not auto-pass.\n' +
           '     Please solve it in the browser window, then press Enter here.\n'
@@ -277,7 +250,6 @@ async function handleChallenge(
         '     3. Press Enter here once done\n'
       );
       await promptUser('  Press Enter after solving the captcha: ');
-      // Give the page a moment to process the solution
       await sleep(2000);
       log('[captcha] Continuing after Arkose FunCaptcha');
       break;
@@ -310,9 +282,6 @@ async function handleChallenge(
   }
 }
 
-/**
- * Wait for the challenge page to go away (URL changes or CF elements disappear).
- */
 async function waitForChallengeGone(
   client: CDPClient,
   kind: ChallengeKind,
@@ -327,10 +296,6 @@ async function waitForChallengeGone(
   return false;
 }
 
-/**
- * After navigation, run the challenge detection loop.
- * Keeps checking for up to `timeoutMs` in case a challenge appears mid-session.
- */
 async function checkAndHandleChallenges(
   client: CDPClient,
   opts: GrokOptions,
@@ -342,7 +307,6 @@ async function checkAndHandleChallenges(
     if (kind === 'none') return;
     await handleChallenge(client, kind, opts, log);
     await sleep(1000);
-    // After handling, re-check in case another challenge appeared
   }
 }
 
@@ -358,15 +322,10 @@ async function launchChrome(opts: {
   const { launch } = await import('chrome-launcher');
 
   const flags = [
-    // Basic
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-default-apps',
-
-    // Anti-detection: avoid headless/automation-specific flags
     '--disable-blink-features=AutomationControlled',
-
-    // Performance / stability
     '--disable-background-networking',
     '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding',
@@ -375,11 +334,7 @@ async function launchChrome(opts: {
     '--metrics-recording-only',
     '--safebrowsing-disable-auto-update',
     '--disable-sync',
-
-    // Avoid extension detection
     '--disable-extensions',
-
-    // Window size (needed for non-headless to avoid detection of tiny window)
     '--window-size=1280,800',
     '--start-maximized',
   ];
@@ -389,9 +344,7 @@ async function launchChrome(opts: {
   }
 
   if (opts.headless) {
-    // Use new headless — slightly less detectable than old --headless
     flags.push('--headless=new');
-    // In headless, these help avoid some fingerprint checks
     flags.push('--disable-dev-shm-usage');
     flags.push('--no-sandbox');
   }
@@ -424,7 +377,6 @@ async function connectCDP(port: number, verbose?: boolean): Promise<CDPClient> {
 }
 
 async function connectRemoteCDP(address: string, verbose?: boolean): Promise<CDPClient> {
-  // Support [ipv6]:port format
   const match = address.match(/^\[(.+)\]:(\d+)$/) ?? address.match(/^([^:]+):(\d+)$/);
   const host = match?.[1] ?? 'localhost';
   const port = parseInt(match?.[2] ?? '9222', 10);
@@ -469,9 +421,7 @@ async function verifyGrokAuth(client: CDPClient, verbose?: boolean): Promise<boo
       expression: `
         (function() {
           const url = window.location.href;
-          // Not on login page
           if (url.includes('/login') || url.includes('/i/flow/login')) return false;
-          // On grok.com without login redirect
           if (url.includes('grok.com') && !url.includes('/login')) return true;
           return false;
         })()
@@ -488,22 +438,15 @@ async function verifyGrokAuth(client: CDPClient, verbose?: boolean): Promise<boo
 
 // ─── Grok.com UI automation ───────────────────────────────────────────────────
 
-/**
- * Selectors tried in priority order.
- * Update these if grok.com changes its DOM.
- */
 const TEXTAREA_SELECTORS = [
-  // Grok-specific
   'textarea[data-testid="grok-compose-input"]',
   'div[data-testid="grok-compose-input"]',
-  // Common patterns
   'textarea[placeholder*="Ask"]',
   'textarea[placeholder*="Message"]',
   'textarea[placeholder*="Type"]',
   'div[contenteditable="true"][data-lexical-editor="true"]',
   'div[contenteditable="true"][role="textbox"]',
   'div[contenteditable="true"]',
-  // Fallbacks
   'textarea[aria-label*="message"]',
   'textarea[aria-label*="Ask"]',
   '#prompt-textarea',
@@ -520,7 +463,7 @@ const SUBMIT_SELECTORS = [
 ];
 
 const RESPONSE_SELECTORS = [
-  // Grok-specific (inspect và update nếu DOM thay đổi)
+  // Grok-specific
   '[data-testid="grok-response-content"]',
   '[data-testid="responseText"]',
   '[data-testid="response-content"]',
@@ -541,6 +484,12 @@ const RESPONSE_SELECTORS = [
   '[class*="message"][class*="assistant"]',
   '[class*="response"][class*="content"]',
   '[class*="assistant"][class*="message"]',
+  // Grok.com / chat UI fallbacks
+  '[class*="assistant"] [class*="content"]',
+  '[class*="response"]',
+  'div[class*="markdown"]',
+  'main article',
+  'section[role="region"] article',
 ];
 
 // Selectors indicating Grok is still generating
@@ -553,7 +502,7 @@ const LOADING_SELECTORS = [
   '[aria-label*="Loading"]',
   '[aria-label*="Generating"]',
   '[aria-label*="Thinking"]',
-  '[aria-label*="Stop"]',          // "Stop generating" button
+  '[aria-label*="Stop"]',
   'button[aria-label*="Stop"]',
   'svg[class*="animate-spin"]',
   'svg[class*="spinner"]',
@@ -645,22 +594,23 @@ async function captureResponse(
 ): Promise<string> {
   const { Runtime } = client;
   const deadline = Date.now() + timeoutMs;
+  const startTime = Date.now();
   let lastText = '';
   let stableCount = 0;
   const STABLE_NEEDED = 6; // 6 × 500ms = 3s stable = done
+  // After 12s, accept stable text even if a loading indicator is still present
+  const STABLE_IGNORE_LOADING_AFTER_MS = 12_000;
 
   if (verbose) console.log('[browser] Polling for response...');
 
-  // Track which selector matched — for debug
   let matchedSelector = '';
 
   while (Date.now() < deadline) {
     try {
-      // ── Strategy 1: specific selectors ──────────────────────────────────
+      // ── Strategy 1: known selectors ────────────────────────────────────
       const result = await Runtime.evaluate({
         expression: `
           (function() {
-            // Try known selectors first
             const sels = ${JSON.stringify(RESPONSE_SELECTORS)};
             for (const sel of sels) {
               try {
@@ -673,17 +623,15 @@ async function captureResponse(
               } catch(e) {}
             }
 
-            // ── Strategy 2: find biggest text block that appeared after send ──
-            // Look for any element with significant text that is NOT the input area
+            // ── Strategy 2: largest text block not in input area ──────────
             const allDivs = document.querySelectorAll('div, section, main');
             let best = { text: '', sel: '', len: 0 };
             for (const el of allDivs) {
-              // Skip input areas
               if (el.querySelector('textarea, [contenteditable]')) continue;
               if (el.closest('textarea, [contenteditable], form, header, nav, footer')) continue;
               const text = (el.innerText || '').trim();
               if (text.length > best.len && text.length > 50) {
-                best = { text, sel: el.tagName + '.' + el.className.slice(0,40), len: text.length };
+                best = { text, sel: el.tagName + '.' + el.className.slice(0, 40), len: text.length };
               }
             }
             if (best.len > 50) return best;
@@ -696,21 +644,20 @@ async function captureResponse(
 
       const val = result.result?.value as { text: string; sel: string } | null;
       const currentText = val?.text ?? '';
+
       if (val?.sel && val.sel !== matchedSelector) {
         matchedSelector = val.sel;
         if (verbose) console.log(`[browser] Matched selector: ${matchedSelector}`);
       }
 
-      // ── Check loading state ──────────────────────────────────────────────
+      // ── Check loading state ────────────────────────────────────────────
       const loadResult = await Runtime.evaluate({
         expression: `
           (function() {
-            // Check known loading selectors
             const loadSels = ${JSON.stringify(LOADING_SELECTORS)};
             if (loadSels.some(s => { try { return document.querySelector(s) !== null; } catch { return false; } })) {
               return true;
             }
-            // Check if submit/send button is disabled (= still generating)
             const submitSels = ${JSON.stringify(SUBMIT_SELECTORS)};
             for (const s of submitSels) {
               try {
@@ -724,6 +671,8 @@ async function captureResponse(
         returnByValue: true,
       });
       const isLoading = loadResult.result?.value === true;
+      const elapsed = Date.now() - startTime;
+      const acceptDespiteLoading = elapsed > STABLE_IGNORE_LOADING_AFTER_MS;
 
       // Progress log
       if (verbose && currentText.length > 0 && currentText.length !== lastText.length) {
@@ -731,10 +680,13 @@ async function captureResponse(
       }
 
       if (currentText.length > 20) {
-        if (currentText === lastText && !isLoading) {
+        const isStable = currentText === lastText;
+        const considerDone = isStable && (!isLoading || acceptDespiteLoading);
+
+        if (isStable) {
           stableCount++;
           if (verbose) process.stdout.write(`\r[browser] Stable ${stableCount}/${STABLE_NEEDED}...`);
-          if (stableCount >= STABLE_NEEDED) {
+          if (stableCount >= STABLE_NEEDED && considerDone) {
             if (verbose) console.log(`\n[browser] Response complete (${currentText.length} chars)`);
             return currentText;
           }
@@ -751,20 +703,19 @@ async function captureResponse(
           await sleep(2000);
         }
 
-        // Dump DOM hint every 10s in verbose mode to help debug selector issues
+        // Dump DOM hint every 10s in verbose mode
         if (verbose) {
-          const elapsed = timeoutMs - (deadline - Date.now());
-          if (elapsed > 0 && Math.round(elapsed / 1000) % 10 === 0) {
+          const elapsedSec = Math.round((Date.now() - startTime) / 1000);
+          if (elapsedSec > 0 && elapsedSec % 10 === 0) {
             const domHint = await Runtime.evaluate({
               expression: `
                 (function() {
-                  // Return a summary of notable elements to help debug
                   const result = [];
-                  const interesting = document.querySelectorAll('[class*="message"],[class*="response"],[class*="chat"],[class*="answer"],[role="article"],[role="main"],article,main');
-                  for (const el of interesting) {
+                  const els = document.querySelectorAll('[class*="message"],[class*="response"],[class*="chat"],[class*="answer"],[role="article"],[role="main"],article,main');
+                  for (const el of els) {
                     const text = (el.innerText || '').trim().slice(0, 60);
                     if (text.length > 5) {
-                      result.push(el.tagName + '[' + (el.getAttribute('class') || '').slice(0,50) + '] = "' + text + '"');
+                      result.push(el.tagName + '[' + (el.getAttribute('class') || '').slice(0, 50) + '] = "' + text + '"');
                     }
                   }
                   return result.slice(0, 8).join('\\n');
@@ -790,7 +741,7 @@ async function captureResponse(
     return lastText;
   }
 
-  // Last resort: dump DOM for debugging
+  // Last resort: dump page body for debugging
   try {
     const dump = await Runtime.evaluate({
       expression: `document.body?.innerText?.slice(0, 2000) ?? ''`,
@@ -861,7 +812,6 @@ export async function runGrokBrowser(
     await Runtime.enable();
 
     // ── 2. Inject stealth patches ──────────────────────────────────────────
-    // Runs before any page scripts — removes webdriver/automation fingerprints
     await Page.addScriptToEvaluateOnNewDocument({ source: STEALTH_SCRIPT });
     log('[browser] Stealth patches injected');
 
@@ -876,12 +826,8 @@ export async function runGrokBrowser(
     log(`[browser] Navigating to ${grokUrl}`);
     await Page.navigate({ url: grokUrl });
 
-    // Use networkIdle instead of just loadEvent for better hydration detection
     try {
-      await Promise.race([
-        Page.loadEventFired(),
-        sleep(15_000),
-      ]);
+      await Promise.race([Page.loadEventFired(), sleep(15_000)]);
     } catch { /* ignore */ }
     await sleep(2500);
 
@@ -899,7 +845,6 @@ export async function runGrokBrowser(
       );
       await waitFor(
         async () => {
-          // Check for challenges first, handle them
           const ch = await detectChallenge(client);
           if (ch !== 'none') await handleChallenge(client, ch, opts, log);
           const authed = await verifyGrokAuth(client, opts.verbose);
@@ -928,7 +873,6 @@ export async function runGrokBrowser(
         1000,
       );
     } catch {
-      // One more challenge check in case CF appeared after nav
       await checkAndHandleChallenges(client, opts, log);
       textareaSel = await waitFor(
         () => findElement(client, TEXTAREA_SELECTORS),
@@ -946,7 +890,6 @@ export async function runGrokBrowser(
     log('[browser] Submitting...');
     let submitted = false;
 
-    // Wait for an enabled submit button
     try {
       const submitSel = await waitFor(
         async () => {
@@ -975,7 +918,6 @@ export async function runGrokBrowser(
     }
 
     if (!submitted) {
-      // Fallback: Shift+Enter to submit (some UIs use this)
       const { Input } = client;
       await Runtime.evaluate({
         expression: `document.querySelector(${JSON.stringify(textareaSel)})?.focus()`,
@@ -1011,7 +953,6 @@ export async function runGrokBrowser(
 // ─── Cookie resolution helper ─────────────────────────────────────────────────
 
 async function resolveCookies(opts: GrokOptions, log: (msg: string) => void): Promise<CookieParam[]> {
-  // Priority: explicit inline > inline file > auto ~/.grok/cookies.json > Chrome profile
   if (opts.inlineCookies) {
     const { parseCookiePayload } = await import('./cookies.js');
     const cookies = parseCookiePayload(opts.inlineCookies);
@@ -1026,7 +967,6 @@ async function resolveCookies(opts: GrokOptions, log: (msg: string) => void): Pr
     return cookies;
   }
 
-  // Auto-load ~/.grok/cookies.json
   const grokHome = path.join(os.homedir(), '.grok');
   const { autoLoadCookies } = await import('./cookies.js');
   const autoCookies = autoLoadCookies(grokHome);
@@ -1035,7 +975,6 @@ async function resolveCookies(opts: GrokOptions, log: (msg: string) => void): Pr
     return autoCookies;
   }
 
-  // Try to read from Chrome profile (skip in manual-login / remote mode)
   if (!opts.manualLogin && !opts.remoteChrome) {
     const { getDefaultChromeCookiePaths, readChromeCookies } = await import('./cookies.js');
     const cookieDbPaths = opts.cookiePath
@@ -1045,7 +984,6 @@ async function resolveCookies(opts: GrokOptions, log: (msg: string) => void): Pr
     for (const dbPath of cookieDbPaths) {
       if (!fs.existsSync(dbPath)) continue;
       try {
-        // Read cookies for both grok.com and x.com (auth lives on x.com)
         const [grokCookies, xCookies] = await Promise.all([
           readChromeCookies(dbPath, 'grok.com', opts.verbose),
           readChromeCookies(dbPath, 'x.com', opts.verbose),
@@ -1058,7 +996,7 @@ async function resolveCookies(opts: GrokOptions, log: (msg: string) => void): Pr
       } catch (err) {
         if (opts.verbose) console.warn(`[browser] Cookie read error for ${dbPath}: ${(err as Error).message}`);
       }
-      break; // Only try the first existing path
+      break;
     }
   }
 
