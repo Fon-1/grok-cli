@@ -290,13 +290,32 @@ Image saved to: C:\Users\darky\Pictures\mars-city.png
 
 ### Read Aloud — Đọc to
 
-Trigger nút Read Aloud của Grok và lưu URL audio.
+> **Lưu ý thực tế:** grok.com web hiện **chưa có** nút Read Aloud (`enable_text_to_speech: false` trong config). Tính năng này mới chỉ có trên **Android app** (ra mắt 22/2/2026).
+>
+> grok-cli giải quyết bằng cách inject **Web Speech API** (`speechSynthesis`) trực tiếp vào Chrome để đọc response — không cần button, không cần premium.
 
 ```powershell
-# Lưu URL audio vào file text
-.\grok.ps1 -p "Tell me a short story about a robot learning to code" `
-  --read-aloud "C:\Users\darky\audio-url.txt" `
+# Đọc to response + lưu text vào file
+.\grok.ps1 -p "Tell me a short story about a robot" `
+  --read-aloud "C:\Users\darky\story.txt" `
   --remote-chrome 127.0.0.1:9222
+```
+
+```powershell
+# Đọc giải thích + lưu markdown
+.\grok.ps1 -p "Summarize the SOLID principles in simple terms" `
+  --read-aloud "C:\Users\darky\solid.md" `
+  --remote-chrome 127.0.0.1:9222
+```
+
+**Điều sẽ xảy ra:**
+1. Grok trả lời → tool lấy text của response
+2. Inject `speechSynthesis.speak()` vào Chrome → **Chrome đọc to trong cửa sổ browser**
+3. Lưu nội dung text vào file output (`.txt` hoặc `.md`)
+
+**Để dừng đọc:** Mở DevTools trong Chrome → Console → gõ:
+```javascript
+window.speechSynthesis.cancel()
 ```
 
 ```powershell

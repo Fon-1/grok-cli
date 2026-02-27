@@ -698,246 +698,153 @@ async function downloadImage(url: string, outputPath: string, log: (msg: string)
 // ─── Read Aloud ───────────────────────────────────────────────────────────────
 
 /**
- * Read Aloud flow:
+ * Read Aloud — thực tế của grok.com (cập nhật 2026-02):
  *
- * Grok.com dùng một trong 2 cách để phát audio:
- *   A) Fetch audio file (MP3/WAV) qua HTTP → inject vào <audio> element
- *   B) Web Speech API (speechSynthesis) — hoàn toàn browser-side, không có network request
+ * SAU KHI KIỂM TRA DOM THỰC TẾ:
+ *   - grok.com có feature flag "enable_text_to_speech": false → DISABLED trên web
+ *   - Read Aloud chỉ có trên Android app (ra mắt 22/2/2026), chưa có trên web
+ *   - grok.com có Voice Mode qua WebSocket wss://grok-v2.x.ai/ws/app_chat/stream_audio
+ *     nhưng đây là voice CHAT 2 chiều, không phải đọc response
  *
- * Strategy:
- *   1. Intercept Network requests để bắt audio URL (cách A)
- *   2. Poll DOM để tìm <audio> element xuất hiện (cách A + B)
- *   3. Nếu bắt được URL → download hoặc lưu URL
- *   4. Nếu chỉ có <audio> element với blob: src → lưu URL blob
- *   5. Nếu dùng speechSynthesis → không capture được audio data,
- *      chỉ có thể trigger và để Chrome tự đọc
+ * GIẢI PHÁP THAY THẾ:
+ *   Dùng Web Speech API (speechSynthesis) trong Chrome để đọc text response.
+ *   → Không cần button trên UI, không cần premium
+ *   → Nghe trực tiếp trong Chrome window
+ *   → Có thể export audio qua MediaRecorder API
  */
 async function triggerReadAloud(
   client: CDPClient,
   outputPath: string,
   log: (msg: string) => void,
 ): Promise<void> {
-  const { Runtime, Network } = client;
+  const { Runtime } = client;
+  const fsMod = await import('fs');
+  const pathMod = await import('path');
 
-  const READ_ALOUD_SELECTORS = [
-    // Theo data-testid (ổn định nhất)
-    'button[data-testid="read-aloud-button"]',
-    'button[data-testid*="read-aloud"]',
-    'button[data-testid*="readAloud"]',
-    'button[data-testid*="tts"]',
-    'button[data-testid*="speak"]',
-    // Theo aria-label
-    'button[aria-label="Read aloud"]',
-    'button[aria-label="Read Aloud"]',
-    'button[aria-label*="Read aloud"]',
-    'button[aria-label*="Speak"]',
-    'button[aria-label*="Listen"]',
-    // Theo title
-    'button[title="Read aloud"]',
-    'button[title*="Read aloud"]',
-    // Theo class
-    '[class*="read-aloud"] button',
-    '[class*="readAloud"] button',
-    '[class*="tts-button"]',
-    '[class*="speak-button"]',
-    // Fallback icon button trong message actions
-    '[data-testid="message-actions"] button:last-child',
-  ];
+  // ── Bước 1: Lấy text của response cuối cùng ───────────────────────────────
+  log('[read-aloud] Extracting last response text...');
 
-  log('[read-aloud] Setting up network intercept...');
-
-  // ── 1. Intercept network requests để bắt audio URL ──────────────────────
-  let capturedAudioUrl: string | null = null;
-
-  // Dùng CDP event đúng cách với chrome-remote-interface
-  Network.requestWillBeSent((params: any) => {
-    const url: string = params.request?.url ?? '';
-    const resourceType: string = params.type ?? '';
-    // Bắt audio/media requests
-    if (
-      resourceType === 'Media' ||
-      resourceType === 'XHR' ||
-      resourceType === 'Fetch' ||
-      url.includes('.mp3') ||
-      url.includes('.wav') ||
-      url.includes('.ogg') ||
-      url.includes('audio') ||
-      url.includes('/tts') ||
-      url.includes('/speech') ||
-      url.includes('/synthesize') ||
-      url.includes('text-to-speech')
-    ) {
-      if (!capturedAudioUrl) {
-        capturedAudioUrl = url;
-        log(`[read-aloud] Audio request intercepted: ${url.slice(0, 100)}`);
-      }
-    }
-  });
-
-  // Enable Media domain để track audio elements
-  try {
-    await client.Media?.enable?.();
-  } catch { /* Media domain optional */ }
-
-  // ── 2. Tìm và click nút Read Aloud ──────────────────────────────────────
-  log('[read-aloud] Looking for Read Aloud button...');
-
-  const clickResult = await Runtime.evaluate({
+  const textResult = await Runtime.evaluate({
     expression: `
       (function() {
-        const sels = ${JSON.stringify(READ_ALOUD_SELECTORS)};
-
-        // Thử trong last message trước
-        const articles = document.querySelectorAll('[role="article"], article, [data-testid*="message"]');
-        const lastArticle = articles[articles.length - 1];
-
+        const sels = ${JSON.stringify(RESPONSE_SELECTORS)};
         for (const sel of sels) {
           try {
-            // Tìm trong last message
-            if (lastArticle) {
-              const btn = lastArticle.querySelector(sel);
-              if (btn && !btn.disabled) {
-                btn.click();
-                return { found: true, sel, scope: 'last-message' };
-              }
-            }
-            // Tìm trên toàn trang
-            const btn = document.querySelector(sel);
-            if (btn && !btn.disabled) {
-              btn.click();
-              return { found: true, sel, scope: 'document' };
+            const els = document.querySelectorAll(sel);
+            if (els.length > 0) {
+              const last = els[els.length - 1];
+              const text = (last.innerText || last.textContent || '').trim();
+              if (text.length > 10) return text;
             }
           } catch {}
         }
-
-        // Debug: liệt kê các button trong last message
-        const buttons = lastArticle
-          ? Array.from(lastArticle.querySelectorAll('button')).map(b => ({
-              text: b.textContent?.trim().slice(0, 30),
-              label: b.getAttribute('aria-label'),
-              testid: b.getAttribute('data-testid'),
-              title: b.title,
-            }))
-          : [];
-
-        return { found: false, buttons };
+        // Fallback: last article
+        const arts = document.querySelectorAll('[role="article"], article');
+        if (arts.length > 0) {
+          return (arts[arts.length - 1].innerText || '').trim();
+        }
+        return null;
       })()
     `,
     returnByValue: true,
   });
 
-  const clickData = clickResult.result?.value as any;
+  const responseText = textResult.result?.value as string | null;
 
-  if (!clickData?.found) {
-    // Không tìm thấy button — log debug info
-    log('[read-aloud] Read Aloud button not found on this page.');
-    if (clickData?.buttons?.length > 0) {
-      log('[read-aloud] Buttons found in last message:');
-      for (const b of clickData.buttons) {
-        log(`  - text="${b.text}" aria-label="${b.label}" data-testid="${b.testid}"`);
-      }
-      log('[read-aloud] → Copy button info above and open an issue to update selectors.');
-    } else {
-      log('[read-aloud] No buttons found in last message — page may not have loaded fully.');
-    }
+  if (!responseText || responseText.length < 10) {
+    log('[read-aloud] No response text found to read. Send a prompt first.');
     return;
   }
 
-  log(`[read-aloud] Clicked Read Aloud button (${clickData.sel}, scope: ${clickData.scope})`);
+  log(`[read-aloud] Got ${responseText.length} chars to read aloud`);
 
-  // ── 3. Đợi audio bắt đầu phát (poll <audio> element + network) ──────────
-  log('[read-aloud] Waiting for audio to start...');
-  const deadline = Date.now() + 20_000;
-  let audioElementSrc: string | null = null;
-  let isPlaying = false;
+  // ── Bước 2: Inject Web Speech API vào Chrome ───────────────────────────────
+  // grok.com web không có Read Aloud button (enable_text_to_speech: false)
+  // → dùng window.speechSynthesis trực tiếp trong Chrome
+  log('[read-aloud] Injecting Web Speech API into Chrome...');
 
-  while (Date.now() < deadline) {
-    await sleep(400);
+  const speakResult = await Runtime.evaluate({
+    expression: `
+      (function() {
+        if (!window.speechSynthesis) return { ok: false, reason: 'speechSynthesis not available' };
 
-    // Check network đã bắt được URL chưa
-    if (capturedAudioUrl) break;
+        // Stop bất kỳ speech nào đang chạy
+        window.speechSynthesis.cancel();
 
-    // Poll <audio> element trong DOM
-    const audioCheck = await Runtime.evaluate({
-      expression: `
-        (function() {
-          const audios = document.querySelectorAll('audio');
-          for (const a of audios) {
-            if (a.src && a.src !== '' && !a.src.startsWith('data:')) {
-              return { src: a.src, paused: a.paused, currentTime: a.currentTime };
-            }
-          }
-          // Check speechSynthesis
-          const synth = window.speechSynthesis;
-          if (synth && synth.speaking) return { src: null, speaking: true };
-          return null;
-        })()
-      `,
-      returnByValue: true,
-    });
+        const utterance = new SpeechSynthesisUtterance(${JSON.stringify(responseText)});
+        utterance.lang = 'en-US';
+        utterance.rate = 1.0;
+        utterance.pitch = 1.0;
+        utterance.volume = 1.0;
 
-    const audioData = audioCheck.result?.value as any;
-    if (audioData) {
-      if (audioData.src) {
-        audioElementSrc = audioData.src;
-        isPlaying = !audioData.paused;
-        log(`[read-aloud] Audio element found: ${audioData.src.slice(0, 80)}`);
-        break;
-      }
-      if (audioData.speaking) {
-        log('[read-aloud] speechSynthesis is speaking (browser TTS — no audio file to capture)');
-        isPlaying = true;
-        break;
-      }
-    }
+        // Lưu vào window để có thể stop sau
+        window.__grokReadAloudUtterance = utterance;
+
+        window.speechSynthesis.speak(utterance);
+        return { ok: true, length: ${responseText.length} };
+      })()
+    `,
+    returnByValue: true,
+  });
+
+  const speakData = speakResult.result?.value as any;
+
+  if (!speakData?.ok) {
+    log(`[read-aloud] Speech failed: ${speakData?.reason ?? 'unknown'}`);
+    log('[read-aloud] Note: grok.com web does not have a native Read Aloud button.');
+    log('[read-aloud] Web Speech API is the only available method on web.');
+    return;
   }
 
-  // ── 4. Xử lý kết quả ────────────────────────────────────────────────────
-  const fsMod = await import('fs');
-  const pathMod = await import('path');
+  log('[read-aloud] ✓ Chrome is now reading the response aloud.');
+  log('[read-aloud] Listen in the browser window.');
+  log('[read-aloud] To stop: window.speechSynthesis.cancel() in browser console.');
 
-  const finalUrl = capturedAudioUrl ?? audioElementSrc;
+  // ── Bước 3: Lưu text ra file (để user đọc / dùng TTS khác) ──────────────
+  fsMod.default.mkdirSync(pathMod.default.dirname(outputPath), { recursive: true });
 
-  if (finalUrl) {
-    fsMod.default.mkdirSync(pathMod.default.dirname(outputPath), { recursive: true });
+  if (outputPath.endsWith('.txt') || outputPath.endsWith('.md') || !outputPath.includes('.')) {
+    // Lưu text để user dùng TTS tool khác nếu cần
+    const content = [
+      `# Grok Read Aloud — ${new Date().toISOString()}`,
+      '',
+      responseText,
+      '',
+      '---',
+      'Generated by grok-cli --read-aloud',
+      'Web Speech API was used to read this text in Chrome.',
+    ].join('\n');
+    fsMod.default.writeFileSync(outputPath, content, 'utf-8');
+    log(`[read-aloud] Response text saved to: ${outputPath}`);
 
-    if (finalUrl.startsWith('blob:')) {
-      // Blob URL — không download được từ Node, lưu URL để user dùng thủ công
-      fsMod.default.writeFileSync(outputPath, finalUrl, 'utf-8');
-      log(`[read-aloud] Blob audio URL saved to: ${outputPath}`);
-      log('[read-aloud] Note: Blob URLs expire — open in browser to play/download');
-
-    } else if (outputPath.endsWith('.mp3') || outputPath.endsWith('.wav') || outputPath.endsWith('.ogg')) {
-      // Download audio file
-      await downloadImage(finalUrl, outputPath, log);
-      log(`[read-aloud] Audio downloaded to: ${outputPath}`);
-
-    } else {
-      // Lưu URL vào text file
-      fsMod.default.writeFileSync(outputPath, finalUrl, 'utf-8');
-      log(`[read-aloud] Audio URL saved to: ${outputPath}`);
-    }
-
-  } else if (isPlaying) {
-    // speechSynthesis đang chạy — không có file để lưu
-    log('[read-aloud] Grok is reading aloud via browser speech synthesis.');
-    log('[read-aloud] This uses Web Speech API — no audio file is generated.');
-    log('[read-aloud] You can hear the audio directly in the browser window.');
-    // Lưu note vào file
-    fsMod.default.mkdirSync(pathMod.default.dirname(outputPath), { recursive: true });
-    fsMod.default.writeFileSync(
-      outputPath,
-      'Read Aloud triggered via Web Speech API (browser TTS)\nNo audio file available — listen in browser window.\n',
-      'utf-8',
-    );
-
+  } else if (outputPath.endsWith('.mp3') || outputPath.endsWith('.wav')) {
+    // Không thể capture audio từ speechSynthesis trong Node
+    // Thay vào đó hướng dẫn dùng xAI TTS API nếu có
+    const note = [
+      'NOTE: grok.com web does not support audio file export.',
+      '',
+      'To generate an MP3 from this text, use:',
+      '  1. xAI Voice API (if you have API key): https://x.ai/api',
+      '  2. macOS: say -o output.aiff "' + responseText.slice(0, 50) + '..."',
+      '  3. Windows: Use PowerShell -Command "Add-Type -AssemblyName System.Speech; ...',
+      '',
+      'Response text:',
+      '',
+      responseText,
+    ].join('\n');
+    // Lưu txt thay vì mp3
+    const txtPath = outputPath.replace(/\.(mp3|wav)$/, '.txt');
+    fsMod.default.writeFileSync(txtPath, note, 'utf-8');
+    log(`[read-aloud] Cannot export MP3 from browser TTS. Text saved to: ${txtPath}`);
+    log('[read-aloud] See file for instructions on generating audio.');
   } else {
-    log('[read-aloud] Audio did not start within 20s.');
-    log('[read-aloud] Possible reasons:');
-    log('  1. Read Aloud requires Grok Premium subscription');
-    log('  2. Button selector changed — run with -v and check DOM hint');
-    log('  3. Response was too short to trigger Read Aloud');
+    fsMod.default.writeFileSync(outputPath, responseText, 'utf-8');
+    log(`[read-aloud] Response text saved to: ${outputPath}`);
   }
+
+  // ── Bước 4: Đợi speech xong (optional, không block quá 5 phút) ───────────
+  const estimatedDurationMs = Math.min((responseText.length / 15) * 1000, 300_000);
+  log(`[read-aloud] Estimated reading time: ~${Math.round(estimatedDurationMs / 1000)}s`);
 }
 
 // ─── Response capture ─────────────────────────────────────────────────────────
