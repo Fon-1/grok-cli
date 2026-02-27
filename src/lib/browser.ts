@@ -302,14 +302,27 @@ async function connectCDP(port: number, verbose?: boolean): Promise<CDPClient> {
   throw new Error(`Could not connect to Chrome CDP: ${last?.message}`);
 }
 
+const REMOTE_CHROME_HINT =
+  '\n  → Chrome chưa mở với cổng 9222. Hãy chạy: .\\start-chrome-debug.ps1\n  → Đợi Chrome mở, vào grok.com đăng nhập (nếu cần), rồi chạy lại lệnh grok.';
+
 async function connectRemoteCDP(address: string, verbose?: boolean): Promise<CDPClient> {
   const match = address.match(/^\[(.+)\]:(\d+)$/) ?? address.match(/^([^:]+):(\d+)$/);
   const host = match?.[1] ?? 'localhost';
   const port = parseInt(match?.[2] ?? '9222', 10);
   const CDP = (await import('chrome-remote-interface')).default;
-  const client = await CDP({ host, port });
-  if (verbose) console.log(`[browser] Connected to remote Chrome at ${address}`);
-  return client;
+  try {
+    const client = await CDP({ host, port });
+    if (verbose) console.log(`[browser] Connected to remote Chrome at ${address}`);
+    return client;
+  } catch (e) {
+    const msg = (e as Error).message || '';
+    const isRefused = /ECONNREFUSED|connect EADDRNOTAVAIL|socket hang up/i.test(msg);
+    throw new Error(
+      isRefused
+        ? `Không kết nối được Chrome tại ${address}.${REMOTE_CHROME_HINT}`
+        : `Không kết nối được Chrome: ${msg}${REMOTE_CHROME_HINT}`
+    );
+  }
 }
 
 // ─── Cookie injection ─────────────────────────────────────────────────────────
@@ -696,155 +709,117 @@ async function downloadImage(url: string, outputPath: string, log: (msg: string)
 }
 
 // ─── Read Aloud ───────────────────────────────────────────────────────────────
+// grok.com web không có nút "Đọc to". Dùng Web Speech API (speechSynthesis) trong Chrome.
+// Ưu tiên dùng capturedAnswer (text đã capture từ captureResponse) để tránh bắt nhầm DOM/sidebar.
 
-/**
- * Read Aloud — thực tế của grok.com (cập nhật 2026-02):
- *
- * SAU KHI KIỂM TRA DOM THỰC TẾ:
- *   - grok.com có feature flag "enable_text_to_speech": false → DISABLED trên web
- *   - Read Aloud chỉ có trên Android app (ra mắt 22/2/2026), chưa có trên web
- *   - grok.com có Voice Mode qua WebSocket wss://grok-v2.x.ai/ws/app_chat/stream_audio
- *     nhưng đây là voice CHAT 2 chiều, không phải đọc response
- *
- * GIẢI PHÁP THAY THẾ:
- *   Dùng Web Speech API (speechSynthesis) trong Chrome để đọc text response.
- *   → Không cần button trên UI, không cần premium
- *   → Nghe trực tiếp trong Chrome window
- *   → Có thể export audio qua MediaRecorder API
- */
 async function triggerReadAloud(
   client: CDPClient,
   outputPath: string,
   log: (msg: string) => void,
-): Promise<void> {
+  onProgress?: (msg: string) => void,
+  capturedAnswer?: string,
+): Promise<string> {
   const { Runtime } = client;
   const fsMod = await import('fs');
   const pathMod = await import('path');
+  const SIDEBAR_MARKERS = ['Lịch sử', 'Dự án', 'Tìm kiếm', 'Chế độ thoại', 'Xem tất cả', 'Bật/tắt thanh bên', 'Ctrl+J', 'Ctrl+K'];
 
-  // ── Bước 1: Lấy text của response cuối cùng ───────────────────────────────
-  log('[read-aloud] Extracting last response text...');
+  let responseText: string | null =
+    capturedAnswer && capturedAnswer.trim().length >= 10 ? capturedAnswer.trim() : null;
 
-  const textResult = await Runtime.evaluate({
-    expression: `
-      (function() {
-        const sels = ${JSON.stringify(RESPONSE_SELECTORS)};
-        for (const sel of sels) {
-          try {
-            const els = document.querySelectorAll(sel);
-            if (els.length > 0) {
-              const last = els[els.length - 1];
-              const text = (last.innerText || last.textContent || '').trim();
-              if (text.length > 10) return text;
-            }
-          } catch {}
-        }
-        // Fallback: last article
-        const arts = document.querySelectorAll('[role="article"], article');
-        if (arts.length > 0) {
-          return (arts[arts.length - 1].innerText || '').trim();
-        }
-        return null;
-      })()
-    `,
-    returnByValue: true,
-  });
-
-  const responseText = textResult.result?.value as string | null;
-
-  if (!responseText || responseText.length < 10) {
-    log('[read-aloud] No response text found to read. Send a prompt first.');
-    return;
+  if (!responseText) {
+    log('[read-aloud] No captured text passed — extracting from DOM...');
+    const textResult = await Runtime.evaluate({
+      expression: `
+        (function() {
+          function isSidebar(t) {
+            if (!t || t.length < 30) return false;
+            const markers = ${JSON.stringify(SIDEBAR_MARKERS)};
+            let hits = 0;
+            for (const m of markers) { if (t.includes(m)) hits++; }
+            return hits >= 2;
+          }
+          const sels = ${JSON.stringify(RESPONSE_SELECTORS)};
+          for (const sel of sels) {
+            try {
+              const els = document.querySelectorAll(sel);
+              if (els.length > 0) {
+                const last = els[els.length - 1];
+                if (last.closest('nav, aside, [role="navigation"]')) continue;
+                const text = (last.innerText || last.textContent || '').trim();
+                if (text.length > 20 && !isSidebar(text)) return text;
+              }
+            } catch(e) {}
+          }
+          const arts = document.querySelectorAll('[role="article"], article');
+          for (let i = arts.length - 1; i >= 0; i--) {
+            const el = arts[i];
+            if (el.closest('nav, aside, [role="navigation"]')) continue;
+            const text = (el.innerText || '').trim();
+            if (text.length > 20 && !isSidebar(text)) return text;
+          }
+          return null;
+        })()
+      `,
+      returnByValue: true,
+    });
+    responseText = textResult.result?.value as string | null;
   }
 
-  log(`[read-aloud] Got ${responseText.length} chars to read aloud`);
+  if (!responseText || responseText.length < 10) {
+    const msg = 'Read Aloud: không có nội dung để đọc (chưa capture được response). Thử -v.';
+    onProgress?.(msg + '\n');
+    log('[read-aloud] No response text found');
+    return msg;
+  }
 
-  // ── Bước 2: Inject Web Speech API vào Chrome ───────────────────────────────
-  // grok.com web không có Read Aloud button (enable_text_to_speech: false)
-  // → dùng window.speechSynthesis trực tiếp trong Chrome
-  log('[read-aloud] Injecting Web Speech API into Chrome...');
+  log(`[read-aloud] Got ${responseText.length} chars, using Web Speech API...`);
 
   const speakResult = await Runtime.evaluate({
     expression: `
       (function() {
         if (!window.speechSynthesis) return { ok: false, reason: 'speechSynthesis not available' };
-
-        // Stop bất kỳ speech nào đang chạy
         window.speechSynthesis.cancel();
-
-        const utterance = new SpeechSynthesisUtterance(${JSON.stringify(responseText)});
-        utterance.lang = 'en-US';
-        utterance.rate = 1.0;
-        utterance.pitch = 1.0;
-        utterance.volume = 1.0;
-
-        // Lưu vào window để có thể stop sau
-        window.__grokReadAloudUtterance = utterance;
-
-        window.speechSynthesis.speak(utterance);
-        return { ok: true, length: ${responseText.length} };
+        const u = new SpeechSynthesisUtterance(${JSON.stringify(responseText)});
+        u.lang = 'en-US';
+        u.rate = 1.0;
+        u.volume = 1.0;
+        window.__grokReadAloudUtterance = u;
+        window.speechSynthesis.speak(u);
+        return { ok: true };
       })()
     `,
     returnByValue: true,
   });
 
-  const speakData = speakResult.result?.value as any;
+  const speakData = speakResult.result?.value as { ok: boolean; reason?: string } | undefined;
 
   if (!speakData?.ok) {
-    log(`[read-aloud] Speech failed: ${speakData?.reason ?? 'unknown'}`);
-    log('[read-aloud] Note: grok.com web does not have a native Read Aloud button.');
-    log('[read-aloud] Web Speech API is the only available method on web.');
-    return;
+    const msg = `Read Aloud: không dùng được giọng đọc (${speakData?.reason ?? 'unknown'}). Đã lưu text ra file.`;
+    onProgress?.(msg + '\n');
+    log(`[read-aloud] ${msg}`);
+  } else {
+    const msg = 'Read Aloud: Chrome đang đọc response (nghe trong cửa sổ Chrome). Text đã lưu ra file.';
+    onProgress?.(msg + '\n');
+    log('[read-aloud] ✓ Chrome is reading aloud. To stop: window.speechSynthesis.cancel() in console.');
   }
 
-  log('[read-aloud] ✓ Chrome is now reading the response aloud.');
-  log('[read-aloud] Listen in the browser window.');
-  log('[read-aloud] To stop: window.speechSynthesis.cancel() in browser console.');
+  const dir = pathMod.default.dirname(outputPath);
+  if (dir) fsMod.default.mkdirSync(dir, { recursive: true });
 
-  // ── Bước 3: Lưu text ra file (để user đọc / dùng TTS khác) ──────────────
-  fsMod.default.mkdirSync(pathMod.default.dirname(outputPath), { recursive: true });
-
-  if (outputPath.endsWith('.txt') || outputPath.endsWith('.md') || !outputPath.includes('.')) {
-    // Lưu text để user dùng TTS tool khác nếu cần
-    const content = [
-      `# Grok Read Aloud — ${new Date().toISOString()}`,
-      '',
-      responseText,
-      '',
-      '---',
-      'Generated by grok-cli --read-aloud',
-      'Web Speech API was used to read this text in Chrome.',
-    ].join('\n');
-    fsMod.default.writeFileSync(outputPath, content, 'utf-8');
-    log(`[read-aloud] Response text saved to: ${outputPath}`);
-
-  } else if (outputPath.endsWith('.mp3') || outputPath.endsWith('.wav')) {
-    // Không thể capture audio từ speechSynthesis trong Node
-    // Thay vào đó hướng dẫn dùng xAI TTS API nếu có
-    const note = [
-      'NOTE: grok.com web does not support audio file export.',
-      'The response text has been saved below.',
-      'Use any local TTS tool to convert to audio:',
-      '  macOS:   say -o output.aiff "text..."  OR  say -f this-file.txt',
-      '  Windows: PowerShell: Add-Type -AssemblyName System.Speech; ...',
-      '  Linux:   espeak-ng -f this-file.txt -w output.wav',
-      '',
-      'Response text:',
-      '',
-      responseText,
-    ].join('\n');
-    // Lưu txt thay vì mp3
-    const txtPath = outputPath.replace(/\.(mp3|wav)$/, '.txt');
-    fsMod.default.writeFileSync(txtPath, note, 'utf-8');
-    log(`[read-aloud] Cannot export MP3 from browser TTS. Text saved to: ${txtPath}`);
-    log('[read-aloud] See file for instructions on generating audio.');
+  let savedPath = outputPath;
+  if (outputPath.toLowerCase().endsWith('.mp3') || outputPath.toLowerCase().endsWith('.wav')) {
+    savedPath = outputPath.replace(/\.(mp3|wav)$/i, '.txt');
+    fsMod.default.writeFileSync(savedPath, responseText, 'utf-8');
+    log(`[read-aloud] Text saved to: ${savedPath} (grok.com web không export audio)`);
   } else {
     fsMod.default.writeFileSync(outputPath, responseText, 'utf-8');
-    log(`[read-aloud] Response text saved to: ${outputPath}`);
+    log(`[read-aloud] Text saved to: ${outputPath}`);
   }
 
-  // ── Bước 4: Đợi speech xong (optional, không block quá 5 phút) ───────────
-  const estimatedDurationMs = Math.min((responseText.length / 15) * 1000, 300_000);
-  log(`[read-aloud] Estimated reading time: ~${Math.round(estimatedDurationMs / 1000)}s`);
+  return speakData?.ok
+    ? `Read Aloud: đang đọc trong Chrome. Text → ${savedPath}`
+    : `Read Aloud: đã lưu text → ${savedPath}`;
 }
 
 // ─── Response capture ─────────────────────────────────────────────────────────
@@ -865,29 +840,39 @@ async function captureResponse(client: CDPClient, timeoutMs: number, verbose?: b
 
   while (Date.now() < deadline) {
     try {
+      const SIDEBAR_MARKERS = ['Lịch sử', 'Dự án', 'Tìm kiếm', 'Chế độ thoại', 'Xem tất cả', 'Bật/tắt thanh bên', 'Ctrl+J', 'Ctrl+K'];
       const result = await Runtime.evaluate({
         expression: `
           (function() {
+            function isSidebarText(t) {
+              if (!t || t.length < 30) return false;
+              const lower = t.toLowerCase();
+              const markers = ${JSON.stringify(SIDEBAR_MARKERS)};
+              let hits = 0;
+              for (const m of markers) { if (t.includes(m)) hits++; }
+              return hits >= 2 || lower.includes('lịch sử') && lower.includes('dự án');
+            }
             const sels = ${JSON.stringify(RESPONSE_SELECTORS)};
             for (const sel of sels) {
               try {
                 const els = document.querySelectorAll(sel);
                 if (els.length > 0) {
                   const last = els[els.length - 1];
+                  if (last.closest('nav, aside, [role="navigation"]')) continue;
                   const text = (last.innerText || last.textContent || '').trim();
-                  if (text.length > 20) return { text, sel };
+                  if (text.length > 20 && !isSidebarText(text)) return { text, sel };
                 }
               } catch(e) {}
             }
-            // Fallback: largest text block not in input area
             const allDivs = document.querySelectorAll('div, section, main');
             let best = { text: '', sel: '', len: 0 };
             for (const el of allDivs) {
+              if (el.closest('nav, aside, [role="navigation"]')) continue;
               if (el.querySelector('textarea, [contenteditable]')) continue;
               if (el.closest('textarea, [contenteditable], form, header, nav, footer')) continue;
               const text = (el.innerText || '').trim();
-              if (text.length > best.len && text.length > 50) {
-                best = { text, sel: el.tagName + '.' + el.className.slice(0,40), len: text.length };
+              if (text.length > best.len && text.length > 50 && !isSidebarText(text)) {
+                best = { text, sel: el.tagName + '.' + (el.className || '').slice(0,40), len: text.length };
               }
             }
             if (best.len > 50) return best;
@@ -904,6 +889,7 @@ async function captureResponse(client: CDPClient, timeoutMs: number, verbose?: b
         if (verbose) console.log(`[browser] Matched selector: ${matchedSelector}`);
       }
 
+      // Check if still loading (grok.com may leave a loading el on page after reply)
       const loadResult = await Runtime.evaluate({
         expression: `
           (function() {
@@ -951,6 +937,7 @@ async function captureResponse(client: CDPClient, timeoutMs: number, verbose?: b
           await sleep(2000);
         }
 
+        // Dump DOM hint every 10s in verbose mode (once per 10s bucket)
         if (verbose) {
           const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
           const bucket = Math.floor(elapsedSec / 10);
@@ -970,7 +957,9 @@ async function captureResponse(client: CDPClient, timeoutMs: number, verbose?: b
               `,
               returnByValue: true,
             });
-            if (domHint.result?.value) console.log('\n[browser] DOM hint:\n' + domHint.result.value);
+            if (domHint.result?.value) {
+              console.log('\n[browser] DOM hint (no response text found yet):\n' + domHint.result.value);
+            }
           }
         }
       }
@@ -1040,13 +1029,30 @@ export async function runGrokBrowser(
     }
 
     const { Network, Page, Runtime } = client;
-    await Network.enable();
-    await Page.enable();
-    await Runtime.enable();
+    // Một số bản Chrome mới (CDP khác) có thể không có Page.enable — bỏ qua lỗi để tránh crash
+    try {
+      await Network.enable();
+    } catch (e) {
+      if (opts.verbose) console.warn('[browser] Network.enable skipped:', (e as Error).message);
+    }
+    try {
+      await Page.enable();
+    } catch (e) {
+      if (opts.verbose) console.warn('[browser] Page.enable skipped:', (e as Error).message);
+    }
+    try {
+      await Runtime.enable();
+    } catch (e) {
+      if (opts.verbose) console.warn('[browser] Runtime.enable skipped:', (e as Error).message);
+    }
 
-    // ── 2. Inject stealth patches ──────────────────────────────────────────
-    await Page.addScriptToEvaluateOnNewDocument({ source: STEALTH_SCRIPT });
-    log('[browser] Stealth patches injected');
+    // ── 2. Inject stealth patches (bỏ qua nếu CDP không hỗ trợ, VD Chrome mới) ──
+    try {
+      await Page.addScriptToEvaluateOnNewDocument({ source: STEALTH_SCRIPT });
+      log('[browser] Stealth patches injected');
+    } catch (e) {
+      if (opts.verbose) console.warn('[browser] addScriptToEvaluateOnNewDocument skipped:', (e as Error).message);
+    }
 
     // ── 3. Resolve and set cookies ─────────────────────────────────────────
     const cookies = await resolveCookies(opts, log);
@@ -1055,8 +1061,28 @@ export async function runGrokBrowser(
     // ── 4. Navigate to grok.com ────────────────────────────────────────────
     const grokUrl = opts.grokUrl || 'https://grok.com';
     log(`[browser] Navigating to ${grokUrl}`);
-    await Page.navigate({ url: grokUrl });
-    try { await Promise.race([Page.loadEventFired(), sleep(15_000)]); } catch { /* ignore */ }
+    let navOk = false;
+    try {
+      await Page.navigate({ url: grokUrl });
+      try { await Promise.race([Page.loadEventFired(), sleep(15_000)]); } catch { /* ignore */ }
+      navOk = true;
+    } catch (e) {
+      if (opts.verbose) console.warn('[browser] Page.navigate not available, using Runtime.evaluate:', (e as Error).message);
+    }
+    if (!navOk) {
+      await Runtime.evaluate({ expression: `window.location.href = ${JSON.stringify(grokUrl)}` });
+      const loadDeadline = Date.now() + 20_000;
+      while (Date.now() < loadDeadline) {
+        await sleep(500);
+        try {
+          const r = await Runtime.evaluate({
+            expression: 'document.readyState === "complete"',
+            returnByValue: true,
+          });
+          if (r.result?.value === true) break;
+        } catch { /* ignore */ }
+      }
+    }
     await sleep(2500);
 
     // ── 5. Handle challenges ───────────────────────────────────────────────
@@ -1119,8 +1145,8 @@ export async function runGrokBrowser(
     log('[browser] Waiting for Grok response...');
     const answer = await captureResponse(client, opts.responseTimeout, opts.verbose);
 
-    // ── 12. Read Aloud (optional) ──────────────────────────────────────────
-    if (opts.readAloud) await triggerReadAloud(client, opts.readAloud, log);
+    // ── 12. Read Aloud (optional) — dùng luôn answer đã capture, tránh query DOM lại ──
+    if (opts.readAloud) await triggerReadAloud(client, opts.readAloud, log, onProgress, answer);
 
     const durationMs = Date.now() - startTime;
     log(`[browser] Done in ${(durationMs / 1000).toFixed(1)}s`);

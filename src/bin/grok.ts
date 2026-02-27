@@ -197,8 +197,8 @@ program
       const result = await runGrokBrowser(bundle.text, grokOpts, (msg) => {
         if (grokOpts.verbose) return; // already printed by browser.ts
         // Show short progress lines
-        if (msg.includes('Navigating') || msg.includes('Waiting') || msg.includes('Pasting') || msg.includes('Done')) {
-          console.log(chalk.dim(`  ${msg.replace(/^\[browser\] /, '')}`));
+        if (msg.includes('Navigating') || msg.includes('Waiting') || msg.includes('Pasting') || msg.includes('Done') || msg.startsWith('Read Aloud:')) {
+          console.log(chalk.dim(`  ${msg.replace(/^\[browser\] /, '').trim()}`));
         }
       });
 
