@@ -882,57 +882,45 @@ export async function runGrokBrowser(
     }
     log(`[browser] Found input: ${textareaSel}`);
 
-    // ── 8. Paste bundle ────────────────────────────────────────────────────
+    // ── 8. Enable mode toggles (Think / DeepSearch) ────────────────────────
+    if (opts.think) {
+      await enableThinkMode(client, log);
+    }
+    if (opts.deepSearch) {
+      await enableDeepSearch(client, log);
+    }
+
+    // ── 9. Imagine mode — generate image instead of text response ──────────
+    if (opts.imagine) {
+      log('[browser] Image generation mode (--imagine)');
+      const imagePath = opts.imagine;
+      await pasteText(client, textareaSel, bundleText, opts.verbose);
+      await submitPrompt(client, textareaSel, log);
+      await sleep(2000);
+      const imageUrl = await captureGeneratedImage(client, opts.responseTimeout, log);
+      if (imageUrl) {
+        await downloadImage(imageUrl, imagePath, log);
+      }
+      const durationMs = Date.now() - startTime;
+      return { answer: `Image saved to: ${imagePath}\nSource: ${imageUrl ?? 'unknown'}`, durationMs };
+    }
+
+    // ── 10. Paste bundle ───────────────────────────────────────────────────
     log(`[browser] Pasting bundle (${bundleText.length.toLocaleString()} chars)...`);
     await pasteText(client, textareaSel, bundleText, opts.verbose);
 
-    // ── 9. Submit ──────────────────────────────────────────────────────────
-    log('[browser] Submitting...');
-    let submitted = false;
-
-    try {
-      const submitSel = await waitFor(
-        async () => {
-          for (const sel of SUBMIT_SELECTORS) {
-            const result = await Runtime.evaluate({
-              expression: `
-                (function() {
-                  const btn = document.querySelector(${JSON.stringify(sel)});
-                  return btn && !btn.disabled && !btn.getAttribute('aria-disabled') ? true : null;
-                })()
-              `,
-              returnByValue: true,
-            });
-            if (result.result?.value === true) return sel;
-          }
-          return null;
-        },
-        12_000,
-        400,
-      );
-      await clickElement(client, submitSel);
-      log(`[browser] Clicked submit: ${submitSel}`);
-      submitted = true;
-    } catch {
-      log('[browser] Submit button not found — trying Enter key');
-    }
-
-    if (!submitted) {
-      const { Input } = client;
-      await Runtime.evaluate({
-        expression: `document.querySelector(${JSON.stringify(textareaSel)})?.focus()`,
-      });
-      await sleep(100);
-      await Input.dispatchKeyEvent({ type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-      await sleep(80);
-      await Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-    }
-
+    // ── 11. Submit ─────────────────────────────────────────────────────────
+    await submitPrompt(client, textareaSel, log);
     await sleep(1500);
 
-    // ── 10. Capture response ───────────────────────────────────────────────
+    // ── 12. Capture response ───────────────────────────────────────────────
     log('[browser] Waiting for Grok response...');
     const answer = await captureResponse(client, opts.responseTimeout, opts.verbose);
+
+    // ── 13. Read Aloud (optional) ──────────────────────────────────────────
+    if (opts.readAloud) {
+      await triggerReadAloud(client, opts.readAloud, log);
+    }
 
     const durationMs = Date.now() - startTime;
     log(`[browser] Done in ${(durationMs / 1000).toFixed(1)}s`);
@@ -947,6 +935,350 @@ export async function runGrokBrowser(
       log('[browser] Keeping browser open (--keep-browser)');
       try { await client?.close(); } catch { /* ignore */ }
     }
+  }
+}
+
+// ─── Mode toggles ─────────────────────────────────────────────────────────────
+
+/**
+ * Enable Grok "Think" mode by clicking the Think toggle button before submitting.
+ * Selectors target the toolbar button that activates extended reasoning.
+ */
+async function enableThinkMode(client: CDPClient, log: (msg: string) => void): Promise<void> {
+  const { Runtime } = client;
+  const THINK_SELECTORS = [
+    'button[data-testid="think-toggle"]',
+    'button[aria-label*="Think"]',
+    'button[aria-label*="think"]',
+    'button[title*="Think"]',
+    '[data-testid*="think"]',
+    'button[class*="think"]',
+  ];
+
+  const result = await Runtime.evaluate({
+    expression: `
+      (function() {
+        const sels = ${JSON.stringify(THINK_SELECTORS)};
+        for (const sel of sels) {
+          try {
+            const btn = document.querySelector(sel);
+            if (btn) {
+              // Only click if not already active
+              const isActive = btn.getAttribute('aria-pressed') === 'true'
+                || btn.classList.contains('active')
+                || btn.getAttribute('data-active') === 'true';
+              if (!isActive) btn.click();
+              return sel;
+            }
+          } catch {}
+        }
+        return null;
+      })()
+    `,
+    returnByValue: true,
+  });
+
+  if (result.result?.value) {
+    log(`[mode] Think mode enabled (${result.result.value})`);
+    await sleep(500);
+  } else {
+    log('[mode] Think toggle not found — may already be active or selector changed');
+  }
+}
+
+/**
+ * Enable Grok "DeepSearch" mode by clicking the DeepSearch toggle button.
+ */
+async function enableDeepSearch(client: CDPClient, log: (msg: string) => void): Promise<void> {
+  const { Runtime } = client;
+  const DEEPSEARCH_SELECTORS = [
+    'button[data-testid="deepsearch-toggle"]',
+    'button[data-testid="deep-search-toggle"]',
+    'button[aria-label*="DeepSearch"]',
+    'button[aria-label*="Deep Search"]',
+    'button[aria-label*="deep search"]',
+    'button[title*="DeepSearch"]',
+    'button[title*="Deep Search"]',
+    '[data-testid*="deepsearch"]',
+    '[data-testid*="deep-search"]',
+    'button[class*="deepsearch"]',
+    'button[class*="deep-search"]',
+  ];
+
+  const result = await Runtime.evaluate({
+    expression: `
+      (function() {
+        const sels = ${JSON.stringify(DEEPSEARCH_SELECTORS)};
+        for (const sel of sels) {
+          try {
+            const btn = document.querySelector(sel);
+            if (btn) {
+              const isActive = btn.getAttribute('aria-pressed') === 'true'
+                || btn.classList.contains('active')
+                || btn.getAttribute('data-active') === 'true';
+              if (!isActive) btn.click();
+              return sel;
+            }
+          } catch {}
+        }
+        return null;
+      })()
+    `,
+    returnByValue: true,
+  });
+
+  if (result.result?.value) {
+    log(`[mode] DeepSearch enabled (${result.result.value})`);
+    await sleep(500);
+  } else {
+    log('[mode] DeepSearch toggle not found — may already be active or selector changed');
+  }
+}
+
+// ─── Submit helper ────────────────────────────────────────────────────────────
+
+async function submitPrompt(
+  client: CDPClient,
+  textareaSel: string,
+  log: (msg: string) => void,
+): Promise<void> {
+  const { Runtime, Input } = client;
+  log('[browser] Submitting...');
+
+  try {
+    const submitSel = await waitFor(
+      async () => {
+        for (const sel of SUBMIT_SELECTORS) {
+          const result = await Runtime.evaluate({
+            expression: `
+              (function() {
+                const btn = document.querySelector(${JSON.stringify(sel)});
+                return btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true' ? true : null;
+              })()
+            `,
+            returnByValue: true,
+          });
+          if (result.result?.value === true) return sel;
+        }
+        return null;
+      },
+      12_000,
+      400,
+    );
+    await clickElement(client, submitSel);
+    log(`[browser] Clicked submit: ${submitSel}`);
+  } catch {
+    log('[browser] Submit button not found — trying Enter key');
+    await Runtime.evaluate({
+      expression: `document.querySelector(${JSON.stringify(textareaSel)})?.focus()`,
+    });
+    await sleep(100);
+    await Input.dispatchKeyEvent({ type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+    await sleep(80);
+    await Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  }
+}
+
+// ─── Image generation ─────────────────────────────────────────────────────────
+
+/**
+ * Wait for Grok to generate an image and return its URL.
+ * Looks for <img> tags that appear in the response area after submission.
+ */
+async function captureGeneratedImage(
+  client: CDPClient,
+  timeoutMs: number,
+  log: (msg: string) => void,
+): Promise<string | null> {
+  const { Runtime } = client;
+  const deadline = Date.now() + timeoutMs;
+  log('[imagine] Waiting for generated image...');
+
+  while (Date.now() < deadline) {
+    try {
+      const result = await Runtime.evaluate({
+        expression: `
+          (function() {
+            // Look for generated images in response area
+            // Grok typically renders them as <img> inside the chat area
+            const imgs = document.querySelectorAll([
+              '[data-testid*="generated-image"] img',
+              '[data-testid*="image-result"] img',
+              '.response-content img',
+              '[class*="generated"] img',
+              '[class*="image-result"] img',
+              'article img[src*="blob:"]',
+              'article img[src*="http"]',
+              '[role="article"] img',
+            ].join(','));
+
+            for (const img of imgs) {
+              const src = img.src || img.getAttribute('src') || '';
+              // Skip tiny icons / avatars (< 100px usually)
+              const w = img.naturalWidth || img.width || 0;
+              const h = img.naturalHeight || img.height || 0;
+              if (src && (w > 100 || h > 100 || src.includes('blob:'))) {
+                return src;
+              }
+            }
+
+            // Also check for download links
+            const links = document.querySelectorAll('a[download][href*="blob:"], a[download][href*=".png"], a[download][href*=".jpg"]');
+            if (links.length > 0) return (links[0] as HTMLAnchorElement).href;
+
+            return null;
+          })()
+        `,
+        returnByValue: true,
+      });
+
+      const url = result.result?.value as string | null;
+      if (url) {
+        log(`[imagine] Image found: ${url.slice(0, 80)}...`);
+        return url;
+      }
+
+      // Check loading state
+      const loading = await Runtime.evaluate({
+        expression: `document.querySelector('[aria-label*="Generating"], [data-testid*="loading"], svg[class*="animate-spin"]') !== null`,
+        returnByValue: true,
+      });
+      if (loading.result?.value) {
+        log('[imagine] Still generating...');
+      }
+    } catch (err) {
+      log(`[imagine] Poll error: ${(err as Error).message}`);
+    }
+
+    await sleep(1000);
+  }
+
+  log('[imagine] Timed out waiting for image');
+  return null;
+}
+
+/**
+ * Download an image URL (http/https or blob:) to a local file.
+ * For blob: URLs we use CDP to fetch the blob data via JS.
+ */
+async function downloadImage(
+  url: string,
+  outputPath: string,
+  log: (msg: string) => void,
+): Promise<void> {
+  const fs = await import('fs');
+  const path = await import('path');
+
+  // Ensure output directory exists
+  fs.default.mkdirSync(path.default.dirname(outputPath), { recursive: true });
+
+  if (url.startsWith('http')) {
+    // Fetch via Node https
+    const https = await import('https');
+    const http = await import('http');
+    const protocol = url.startsWith('https') ? https.default : http.default;
+
+    await new Promise<void>((resolve, reject) => {
+      const file = fs.default.createWriteStream(outputPath);
+      protocol.get(url, (res) => {
+        res.pipe(file);
+        file.on('finish', () => { file.close(); resolve(); });
+      }).on('error', reject);
+    });
+
+    log(`[imagine] Image saved to: ${outputPath}`);
+  } else {
+    log(`[imagine] Blob URL cannot be downloaded directly — open browser to save manually`);
+    log(`[imagine] Blob URL: ${url}`);
+  }
+}
+
+// ─── Read Aloud ───────────────────────────────────────────────────────────────
+
+/**
+ * Click the "Read Aloud" button on the last Grok response and
+ * intercept the audio network request URL.
+ */
+async function triggerReadAloud(
+  client: CDPClient,
+  outputPath: string,
+  log: (msg: string) => void,
+): Promise<void> {
+  const { Runtime, Network, Page } = client;
+
+  const READ_ALOUD_SELECTORS = [
+    'button[aria-label*="Read aloud"]',
+    'button[aria-label*="Read Aloud"]',
+    'button[data-testid*="read-aloud"]',
+    'button[data-testid*="tts"]',
+    'button[title*="Read aloud"]',
+    'button[title*="Read Aloud"]',
+    '[class*="read-aloud"]',
+    '[class*="tts"] button',
+  ];
+
+  log('[read-aloud] Looking for Read Aloud button...');
+
+  // Intercept audio requests
+  let audioUrl: string | null = null;
+  const requestHandler = (params: any) => {
+    const url: string = params.request?.url ?? '';
+    if (url.includes('.mp3') || url.includes('audio') || url.includes('tts') || url.includes('speech')) {
+      audioUrl = url;
+      log(`[read-aloud] Audio URL intercepted: ${url.slice(0, 80)}`);
+    }
+  };
+  Network.requestWillBeSent(requestHandler);
+
+  // Click the button
+  const result = await Runtime.evaluate({
+    expression: `
+      (function() {
+        const sels = ${JSON.stringify(READ_ALOUD_SELECTORS)};
+        for (const sel of sels) {
+          try {
+            // Find in the last message
+            const articles = document.querySelectorAll('[role="article"], article');
+            const last = articles[articles.length - 1];
+            const container = last || document;
+            const btn = container.querySelector(sel);
+            if (btn) { btn.click(); return sel; }
+          } catch {}
+        }
+        return null;
+      })()
+    `,
+    returnByValue: true,
+  });
+
+  if (!result.result?.value) {
+    log('[read-aloud] Read Aloud button not found — selector may have changed');
+    return;
+  }
+
+  log(`[read-aloud] Clicked Read Aloud (${result.result.value}), waiting for audio...`);
+
+  // Wait up to 15s for audio URL
+  const deadline = Date.now() + 15_000;
+  while (!audioUrl && Date.now() < deadline) {
+    await sleep(500);
+  }
+
+  // Remove listener
+  try { Network.requestWillBeSent.call(null); } catch { /* ignore */ }
+
+  if (audioUrl && outputPath) {
+    if (outputPath.endsWith('.mp3') || outputPath.endsWith('.wav')) {
+      // Try to download
+      await downloadImage(audioUrl, outputPath, log);
+    } else {
+      // Save URL to text file
+      const fs = await import('fs');
+      fs.default.writeFileSync(outputPath, audioUrl, 'utf-8');
+      log(`[read-aloud] Audio URL saved to: ${outputPath}`);
+    }
+  } else if (!audioUrl) {
+    log('[read-aloud] No audio URL captured — may require premium account or selector update');
   }
 }
 

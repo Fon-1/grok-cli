@@ -73,6 +73,11 @@ program
   .option('--remote-chrome <host:port>', 'Attach to existing remote Chrome via CDP (e.g. localhost:9222)')
   .option('--write-output <path>', 'Write response to file')
   .option('-v, --verbose', 'Verbose logging')
+  // ── Grok-specific modes ──────────────────────────────────────────────────
+  .option('--think', 'Enable Think mode (deep reasoning before answering)')
+  .option('--deep-search', 'Enable DeepSearch mode (Grok searches the web first)')
+  .option('--imagine <output-file>', 'Generate image from prompt, save to file (e.g. output.png)')
+  .option('--read-aloud <output-file>', 'Trigger Read Aloud, save audio URL or MP3 to file')
   .action(async (opts) => {
     // Allow prompt from stdin if not provided as argument
     let prompt: string = opts.prompt ?? '';
@@ -117,6 +122,11 @@ program
       remoteChrome: opts.remoteChrome,
       writeOutput: opts.writeOutput,
       verbose: opts.verbose ?? false,
+      // Grok-specific modes
+      think: opts.think ?? false,
+      deepSearch: opts.deepSearch ?? false,
+      imagine: opts.imagine,
+      readAloud: opts.readAloud,
     };
 
     // ── Build bundle ──────────────────────────────────────────────────────
@@ -124,6 +134,16 @@ program
     const bundle = await buildBundle(prompt, grokOpts.files, grokOpts.verbose);
 
     printBundleInfo(bundle.fileCount, bundle.charCount, bundle.skippedFiles);
+
+    // ── Print active modes ────────────────────────────────────────────────
+    const activeModes: string[] = [];
+    if (grokOpts.think) activeModes.push('Think');
+    if (grokOpts.deepSearch) activeModes.push('DeepSearch');
+    if (grokOpts.imagine) activeModes.push(`Imagine → ${grokOpts.imagine}`);
+    if (grokOpts.readAloud) activeModes.push(`ReadAloud → ${grokOpts.readAloud}`);
+    if (activeModes.length > 0) {
+      console.log(chalk.cyan(`  Modes: ${activeModes.join(', ')}`));
+    }
 
     // ── Dry run / render / copy ───────────────────────────────────────────
     if (grokOpts.render || grokOpts.dryRun) {

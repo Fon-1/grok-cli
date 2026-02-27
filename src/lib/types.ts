@@ -36,6 +36,16 @@ export interface GrokOptions {
   writeOutput?: string;
   /** Verbose logging */
   verbose: boolean;
+
+  // ── Grok-specific modes ──────────────────────────────────────────────────
+  /** Enable Think mode (deep reasoning) */
+  think: boolean;
+  /** Enable DeepSearch mode (web search before answering) */
+  deepSearch: boolean;
+  /** Generate image from prompt — saves to this file path (PNG/JPG) */
+  imagine?: string;
+  /** Trigger Read Aloud and save audio URL or MP3 to this path */
+  readAloud?: string;
 }
 
 export interface SessionMeta {
