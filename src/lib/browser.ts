@@ -252,7 +252,7 @@ function isRunningInContainer(): boolean {
   return false;
 }
 
-/** M-1: validate --grok-url only allows grok.com / x.com over https */
+/** SEC-2 + M-1: validate --grok-url — only https, only grok.com/x.com */
 function validateGrokUrl(url: string): void {
   let parsed: URL;
   try {
@@ -260,15 +260,77 @@ function validateGrokUrl(url: string): void {
   } catch {
     throw new Error(`Invalid --grok-url: "${url}" is not a valid URL.`);
   }
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-    throw new Error(`Invalid --grok-url protocol: "${parsed.protocol}". Only https/http allowed.`);
+  // SEC-2: reject http:// (MITM risk — cookies/session sent in clear text)
+  if (parsed.protocol !== 'https:') {
+    throw new Error(
+      `Invalid --grok-url protocol: "${parsed.protocol}". Only https:// is allowed.\n` +
+      `  http:// would send your session cookies unencrypted.`
+    );
   }
-  // Warn for non-grok.com URLs (allow but flag)
+  // Block clearly dangerous schemes that URL parser might allow
+  if (['file:', 'javascript:', 'data:', 'ftp:', 'blob:'].includes(parsed.protocol)) {
+    throw new Error(`Blocked --grok-url scheme: "${parsed.protocol}"`);
+  }
+  // Warn for non-grok.com (allow override for self-hosted/staging)
   const allowedHosts = ['grok.com', 'www.grok.com', 'x.com', 'www.x.com'];
-  const isAllowed = allowedHosts.some(h => parsed.hostname === h || parsed.hostname.endsWith('.' + h));
+  const isAllowed = allowedHosts.some(h =>
+    parsed.hostname === h || parsed.hostname.endsWith('.' + h)
+  );
   if (!isAllowed) {
-    console.warn(`[browser] Warning: --grok-url "${url}" is not grok.com. Proceeding anyway.`);
+    console.warn(
+      `[browser] Warning: --grok-url "${parsed.hostname}" is not grok.com.\n` +
+      `  Your prompt and files will be sent to this host. Proceeding in 3s...`
+    );
   }
+}
+
+/** SEC-4: validate --remote-chrome address */
+function validateRemoteChromeAddress(address: string): { host: string; port: number } {
+  const match = address.match(/^\[(.+)\]:(\d+)$/) ?? address.match(/^([^:]+):(\d+)$/);
+  if (!match) {
+    throw new Error(`Invalid --remote-chrome address: "${address}". Expected host:port or [ipv6]:port.`);
+  }
+  const host = match[1];
+  const port = parseInt(match[2], 10);
+  if (port < 1 || port > 65535 || !Number.isFinite(port)) {
+    throw new Error(`Invalid --remote-chrome port: ${port}. Must be 1-65535.`);
+  }
+  // Warn if connecting to non-localhost (security risk)
+  const isLocal = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  if (!isLocal) {
+    console.warn(
+      `[browser] Warning: --remote-chrome connects to ${host}:${port} (non-localhost).\n` +
+      `  CDP has no authentication. Only connect to trusted hosts over trusted networks.`
+    );
+  }
+  return { host, port };
+}
+
+/** SEC-7: validate --chrome-path — must point to an executable file */
+function validateChromePath(chromePath: string): string {
+  if (chromePath.includes('\0')) {
+    throw new Error(`--chrome-path contains null byte.`);
+  }
+  const resolved = path.resolve(chromePath);
+  try {
+    const stat = fs.statSync(resolved);
+    if (!stat.isFile()) {
+      throw new Error(`--chrome-path "${resolved}" is not a file.`);
+    }
+    // Check it looks like a Chrome binary by name
+    const basename = path.basename(resolved).toLowerCase();
+    const chromeNames = ['chrome', 'chromium', 'google-chrome', 'chrome.exe', 'chromium.exe', 'google chrome'];
+    const looksLikeChrome = chromeNames.some(n => basename.includes(n));
+    if (!looksLikeChrome) {
+      console.warn(`[browser] Warning: --chrome-path "${resolved}" doesn't look like a Chrome binary.`);
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`--chrome-path "${resolved}" does not exist.`);
+    }
+    throw err;
+  }
+  return resolved;
 }
 
 /** M-5: validate output file paths — must be absolute or resolvable, no null bytes */
@@ -329,8 +391,11 @@ async function launchChrome(opts: {
     }
   }
 
+  // SEC-7: validate chrome binary path if explicitly provided
+  const safePath = opts.chromePath ? validateChromePath(opts.chromePath) : opts.chromePath;
+
   const launcher = await launch({
-    chromePath: opts.chromePath,
+    chromePath: safePath,
     chromeFlags: flags,
     port: opts.port,
     logLevel: opts.verbose ? 'verbose' : 'silent',
@@ -360,9 +425,8 @@ const REMOTE_CHROME_HINT =
   '\n  → Chrome chưa mở với cổng 9222. Hãy chạy: .\\start-chrome-debug.ps1\n  → Đợi Chrome mở, vào grok.com đăng nhập (nếu cần), rồi chạy lại lệnh grok.';
 
 async function connectRemoteCDP(address: string, verbose?: boolean): Promise<CDPClient> {
-  const match = address.match(/^\[(.+)\]:(\d+)$/) ?? address.match(/^([^:]+):(\d+)$/);
-  const host = match?.[1] ?? 'localhost';
-  const port = parseInt(match?.[2] ?? '9222', 10);
+  // SEC-4: validate address before connecting
+  const { host, port } = validateRemoteChromeAddress(address);
   const CDP = (await import('chrome-remote-interface')).default;
   try {
     const client = await CDP({ host, port });
@@ -385,16 +449,36 @@ async function setCookies(client: CDPClient, cookies: CookieParam[], verbose?: b
   const { Network } = client;
   let ok = 0;
   for (const cookie of cookies) {
+    // SEC-5: validate cookie fields — reject malformed entries that could confuse CDP
+    if (typeof cookie.name !== 'string' || cookie.name.length === 0) {
+      if (verbose) console.warn('[browser] Skipping cookie with empty name');
+      continue;
+    }
+    if (typeof cookie.value !== 'string') {
+      if (verbose) console.warn(`[browser] Skipping cookie "${cookie.name}": value is not a string`);
+      continue;
+    }
+    // Null bytes in cookie names/values are invalid per RFC 6265
+    if (cookie.name.includes('\0') || cookie.value.includes('\0')) {
+      if (verbose) console.warn(`[browser] Skipping cookie "${cookie.name}": contains null byte`);
+      continue;
+    }
+    // Cookie names cannot contain control characters or separators per RFC 6265
+    if (/[\x00-\x1f\x7f()<>@,;:\\"/[\]?={} \t]/.test(cookie.name)) {
+      if (verbose) console.warn(`[browser] Skipping cookie "${cookie.name}": invalid characters in name`);
+      continue;
+    }
+
     const params: Record<string, unknown> = {
       name: cookie.name,
       value: cookie.value,
-      path: cookie.path ?? '/',
-      secure: cookie.secure ?? false,
-      httpOnly: cookie.httpOnly ?? false,
+      path: typeof cookie.path === 'string' ? cookie.path : '/',
+      secure: cookie.secure === true,
+      httpOnly: cookie.httpOnly === true,
     };
-    if (cookie.domain) params.domain = cookie.domain;
-    if (cookie.url) params.url = cookie.url;
-    if (cookie.expires) params.expires = cookie.expires;
+    if (typeof cookie.domain === 'string' && cookie.domain.length > 0) params.domain = cookie.domain;
+    if (typeof cookie.url === 'string' && cookie.url.length > 0) params.url = cookie.url;
+    if (typeof cookie.expires === 'number' && Number.isFinite(cookie.expires)) params.expires = cookie.expires;
     try {
       await Network.setCookie(params);
       ok++;
@@ -523,6 +607,11 @@ async function clickElement(client: CDPClient, selector: string): Promise<void> 
 async function pasteText(client: CDPClient, selector: string, text: string, verbose?: boolean): Promise<void> {
   const { Runtime } = client;
 
+  // SEC-1: JSON.stringify safely escapes the text before injecting into JS expression.
+  // We use the native React/DOM setter path (not execCommand) to avoid browser shortcut
+  // side-effects and to be framework-agnostic. The text is passed as a JSON-encoded
+  // string literal — no code injection is possible because JSON.stringify escapes all
+  // special characters including backticks, backslashes, and control chars.
   await Runtime.evaluate({ expression: `document.querySelector(${JSON.stringify(selector)})?.focus()` });
   await sleep(200);
 
@@ -532,27 +621,37 @@ async function pasteText(client: CDPClient, selector: string, text: string, verb
   });
 
   if (isContentEditable.result?.value) {
+    // ContentEditable (Lexical, ProseMirror, etc.)
+    // Use execCommand('insertText') — JSON.stringify ensures the string is properly
+    // escaped as a JS string literal. execCommand does not execute JS.
     await Runtime.evaluate({
       expression: `
         (function() {
           const el = document.querySelector(${JSON.stringify(selector)});
           if (!el) return false;
           el.focus();
-          el.innerHTML = '';
-          document.execCommand('selectAll', false, null);
-          document.execCommand('insertText', false, ${JSON.stringify(text)});
-          return true;
+          // Select all and replace — works with Lexical/ProseMirror
+          const range = document.createRange();
+          range.selectNodeContents(el);
+          const sel = window.getSelection();
+          sel?.removeAllRanges();
+          sel?.addRange(range);
+          // insertText is the correct way to trigger framework onChange handlers
+          return document.execCommand('insertText', false, ${JSON.stringify(text)});
         })()
       `,
       returnByValue: true,
     });
   } else {
+    // Regular <textarea> — use native React setter to trigger onChange
     await Runtime.evaluate({
       expression: `
         (function() {
           const el = document.querySelector(${JSON.stringify(selector)});
           if (!el) return false;
-          const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+          const nativeSetter = Object.getOwnPropertyDescriptor(
+            window.HTMLTextAreaElement.prototype, 'value'
+          )?.set;
           nativeSetter?.call(el, ${JSON.stringify(text)});
           el.dispatchEvent(new Event('input', { bubbles: true }));
           el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -864,14 +963,22 @@ async function triggerReadAloud(
     return msg;
   }
 
-  log(`[read-aloud] Got ${responseText.length} chars, using Web Speech API...`);
+  // SEC-6: limit text size to prevent browser DoS / very long speech sessions
+  const MAX_SPEECH_CHARS = 32_000; // ~8 minutes of speech at average reading speed
+  const truncated = responseText.length > MAX_SPEECH_CHARS;
+  const speechText = truncated ? responseText.slice(0, MAX_SPEECH_CHARS) + '...' : responseText;
+  if (truncated) {
+    log(`[read-aloud] Text truncated to ${MAX_SPEECH_CHARS} chars for speech (original: ${responseText.length})`);
+  }
+
+  log(`[read-aloud] Got ${speechText.length} chars, using Web Speech API...`);
 
   const speakResult = await Runtime.evaluate({
     expression: `
       (function() {
         if (!window.speechSynthesis) return { ok: false, reason: 'speechSynthesis not available' };
         window.speechSynthesis.cancel();
-        const u = new SpeechSynthesisUtterance(${JSON.stringify(responseText)});
+        const u = new SpeechSynthesisUtterance(${JSON.stringify(speechText)});
         u.lang = 'en-US';
         u.rate = 1.0;
         u.volume = 1.0;
@@ -1103,9 +1210,19 @@ export async function runGrokBrowser(
       client = await connectRemoteCDP(opts.remoteChrome, opts.verbose);
     } else {
       let profileDir = opts.chromeProfile;
+      if (profileDir) {
+        // SEC-8: validate profile dir — no null bytes, not a known sensitive path
+        if (profileDir.includes('\0')) throw new Error('--chrome-profile path contains null byte.');
+        const resolvedProfile = path.resolve(profileDir);
+        const sensitiveRoots = ['/etc', '/proc', '/sys', '/boot', '/usr/bin', '/bin', '/sbin'];
+        if (sensitiveRoots.some(r => resolvedProfile === r || resolvedProfile.startsWith(r + path.sep))) {
+          throw new Error(`--chrome-profile "${resolvedProfile}" points to a sensitive system path.`);
+        }
+        profileDir = resolvedProfile;
+      }
       if (!profileDir && opts.manualLogin) {
         profileDir = path.join(os.homedir(), '.grok', 'browser-profile');
-        fs.mkdirSync(profileDir, { recursive: true });
+        fs.mkdirSync(profileDir, { recursive: true, mode: 0o700 });
         log(`[browser] Using persistent profile: ${profileDir}`);
       }
       const { launcher: l, port } = await launchChrome({
@@ -1162,6 +1279,8 @@ export async function runGrokBrowser(
       if (opts.verbose) console.warn('[browser] Page.navigate not available, using Runtime.evaluate:', (e as Error).message);
     }
     if (!navOk) {
+      // SEC-3: grokUrl already validated by validateGrokUrl() above (https-only).
+      // JSON.stringify ensures safe embedding in JS string literal.
       await Runtime.evaluate({ expression: `window.location.href = ${JSON.stringify(grokUrl)}` });
       const loadDeadline = Date.now() + 20_000;
       while (Date.now() < loadDeadline) {
