@@ -57,19 +57,10 @@ async function promptUser(question: string): Promise<void> {
 
 // ─── Stealth: remove webdriver fingerprints ───────────────────────────────────
 
-/**
- * Injected into every page before any scripts run (Page.addScriptToEvaluateOnNewDocument).
- * Removes the most common automation signals Cloudflare / Arkose look for.
- */
 const STEALTH_SCRIPT = `
 (function() {
-  // 1. Remove navigator.webdriver
-  Object.defineProperty(navigator, 'webdriver', {
-    get: () => undefined,
-    configurable: true,
-  });
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });
 
-  // 2. Fake plugins array (empty = headless giveaway)
   Object.defineProperty(navigator, 'plugins', {
     get: () => {
       const arr = [
@@ -83,22 +74,13 @@ const STEALTH_SCRIPT = `
     configurable: true,
   });
 
-  // 3. Fake languages
-  Object.defineProperty(navigator, 'languages', {
-    get: () => ['en-US', 'en'],
-    configurable: true,
-  });
+  Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'], configurable: true });
 
-  // 4. Chrome runtime (missing in headless)
   if (!window.chrome) {
     Object.defineProperty(window, 'chrome', {
       value: {
         app: { isInstalled: false, InstallState: {}, RunningState: {} },
-        runtime: {
-          connect: () => {},
-          sendMessage: () => {},
-          id: undefined,
-        },
+        runtime: { connect: () => {}, sendMessage: () => {}, id: undefined },
         loadTimes: () => {},
         csi: () => {},
       },
@@ -106,18 +88,14 @@ const STEALTH_SCRIPT = `
     });
   }
 
-  // 5. Permissions API — make geolocation appear "prompt" not "denied"
   if (navigator.permissions) {
     const origQuery = navigator.permissions.query.bind(navigator.permissions);
     navigator.permissions.query = (params) => {
-      if (params && params.name === 'notifications') {
-        return Promise.resolve({ state: 'denied', onchange: null });
-      }
+      if (params && params.name === 'notifications') return Promise.resolve({ state: 'denied', onchange: null });
       return origQuery(params);
     };
   }
 
-  // 6. Hide automation-specific properties
   ['__webdriver_script_fn', '__driver_evaluate', '__webdriver_evaluate',
    '__selenium_evaluate', '__fxdriver_evaluate', '__driver_unwrapped',
    '__webdriver_unwrapped', '__selenium_unwrapped', '__fxdriver_unwrapped',
@@ -125,11 +103,8 @@ const STEALTH_SCRIPT = `
    '$cdc_asdjflasutopfhvcZLmcfl_', 'document.$cdc_asdjflasutopfhvcZLmcfl_',
    '__$webdriverAsyncExecutor', '__lastWatirAlert', '__lastWatirConfirm',
    '__lastWatirPrompt', '_WEBDRIVER_CLIENT_', '__webdriver_script_func',
-  ].forEach(prop => {
-    try { delete window[prop]; } catch {}
-  });
+  ].forEach(prop => { try { delete window[prop]; } catch {} });
 
-  // 7. WebGL vendor/renderer spoofing
   const getParam = WebGLRenderingContext.prototype.getParameter;
   WebGLRenderingContext.prototype.getParameter = function(param) {
     if (param === 37445) return 'Intel Inc.';
@@ -168,34 +143,22 @@ async function detectChallenge(client: CDPClient): Promise<ChallengeKind> {
           const title = document.title || '';
           const body = document.body?.innerText || '';
 
-          if (title.includes('Just a moment') || body.includes('Checking your browser')) {
-            return 'cloudflare-challenge';
-          }
+          if (title.includes('Just a moment') || body.includes('Checking your browser')) return 'cloudflare-challenge';
           if (document.querySelector('iframe[src*="challenges.cloudflare.com"]') ||
               document.querySelector('[class*="cf-turnstile"]') ||
-              document.querySelector('input[name="cf-turnstile-response"]')) {
-            return 'cloudflare-turnstile';
-          }
+              document.querySelector('input[name="cf-turnstile-response"]')) return 'cloudflare-turnstile';
           if (document.querySelector('iframe[src*="arkoselabs.com"]') ||
               document.querySelector('iframe[src*="funcaptcha.com"]') ||
               document.querySelector('#FunCaptcha') ||
               document.querySelector('[id*="arkose"]') ||
-              document.querySelector('input[name="fc-token"]')) {
-            return 'arkose-funcaptcha';
-          }
+              document.querySelector('input[name="fc-token"]')) return 'arkose-funcaptcha';
           if (document.querySelector('iframe[src*="recaptcha"]') ||
               document.querySelector('.g-recaptcha') ||
-              document.querySelector('[data-sitekey]')) {
-            return 'recaptcha';
-          }
+              document.querySelector('[data-sitekey]')) return 'recaptcha';
           if (document.querySelector('iframe[src*="hcaptcha.com"]') ||
-              document.querySelector('.h-captcha')) {
-            return 'hcaptcha';
-          }
+              document.querySelector('.h-captcha')) return 'hcaptcha';
           if (url.includes('x.com/login') || url.includes('twitter.com/login') ||
-              url.includes('/i/flow/login') || url.includes('grok.com/login')) {
-            return 'login-wall';
-          }
+              url.includes('/i/flow/login') || url.includes('grok.com/login')) return 'login-wall';
           return 'none';
         })()
       `,
@@ -220,10 +183,7 @@ async function handleChallenge(
     case 'cloudflare-turnstile': {
       log(`[captcha] Cloudflare challenge detected (${kind})`);
       if (opts.headless) {
-        console.warn(
-          '\n  ⚠  Cloudflare challenge detected in headless mode.\n' +
-          '     Restart without --headless to let Chrome solve it automatically.\n'
-        );
+        console.warn('\n  ⚠  Cloudflare challenge in headless mode — restart without --headless.\n');
       } else {
         log('[captcha] Waiting up to 30s for Cloudflare to auto-pass...');
       }
@@ -231,62 +191,35 @@ async function handleChallenge(
       if (resolved) {
         log('[captcha] Cloudflare challenge passed ✓');
       } else {
-        console.log(
-          '\n  ⏸  Cloudflare challenge did not auto-pass.\n' +
-          '     Please solve it in the browser window, then press Enter here.\n'
-        );
+        console.log('\n  ⏸  Cloudflare challenge did not auto-pass.\n     Please solve it in the browser window, then press Enter here.\n');
         await promptUser('  Press Enter after the challenge is solved: ');
         log('[captcha] Continuing after user confirmation');
       }
       break;
     }
-
     case 'arkose-funcaptcha': {
-      console.log(
-        '\n  ⏸  Arkose FunCaptcha detected (X.com security challenge)\n' +
-        '     This requires human interaction.\n\n' +
-        '     1. Look at the browser window\n' +
-        '     2. Solve the image puzzle\n' +
-        '     3. Press Enter here once done\n'
-      );
+      console.log('\n  ⏸  Arkose FunCaptcha detected (X.com security challenge)\n     1. Look at the browser window\n     2. Solve the image puzzle\n     3. Press Enter here once done\n');
       await promptUser('  Press Enter after solving the captcha: ');
       await sleep(2000);
       log('[captcha] Continuing after Arkose FunCaptcha');
       break;
     }
-
     case 'recaptcha':
     case 'hcaptcha': {
-      console.log(
-        `\n  ⏸  ${kind === 'recaptcha' ? 'reCAPTCHA' : 'hCaptcha'} detected.\n` +
-        '     Please solve it in the browser window, then press Enter here.\n'
-      );
+      console.log(`\n  ⏸  ${kind === 'recaptcha' ? 'reCAPTCHA' : 'hCaptcha'} detected.\n     Please solve it in the browser window, then press Enter here.\n`);
       await promptUser('  Press Enter after solving the captcha: ');
       await sleep(1500);
       log('[captcha] Continuing after captcha solve');
       break;
     }
-
     case 'login-wall': {
-      console.log(
-        '\n  ✗  Redirected to login page.\n\n' +
-        '     Your session cookies are missing or expired.\n\n' +
-        '     Options:\n' +
-        '       1. Run: grok cookies   — check what cookies were found\n' +
-        '       2. Export cookies from Chrome → ~/.grok/cookies.json\n' +
-        '       3. Use --manual-login to log in via the browser\n' +
-        '       4. Use --inline-cookies-file path/to/cookies.json\n'
-      );
+      console.log('\n  ✗  Redirected to login page.\n\n     Options:\n       1. grok cookies\n       2. Export cookies → ~/.grok/cookies.json\n       3. --manual-login\n       4. --inline-cookies-file\n');
       throw new Error('Redirected to login page — cookies missing or expired');
     }
   }
 }
 
-async function waitForChallengeGone(
-  client: CDPClient,
-  kind: ChallengeKind,
-  timeoutMs: number,
-): Promise<boolean> {
+async function waitForChallengeGone(client: CDPClient, kind: ChallengeKind, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await sleep(1000);
@@ -296,12 +229,7 @@ async function waitForChallengeGone(
   return false;
 }
 
-async function checkAndHandleChallenges(
-  client: CDPClient,
-  opts: GrokOptions,
-  log: (msg: string) => void,
-  maxRounds = 3,
-): Promise<void> {
+async function checkAndHandleChallenges(client: CDPClient, opts: GrokOptions, log: (msg: string) => void, maxRounds = 3): Promise<void> {
   for (let round = 0; round < maxRounds; round++) {
     const kind = await detectChallenge(client);
     if (kind === 'none') return;
@@ -339,9 +267,7 @@ async function launchChrome(opts: {
     '--start-maximized',
   ];
 
-  if (opts.profileDir) {
-    flags.push(`--user-data-dir=${opts.profileDir}`);
-  }
+  if (opts.profileDir) flags.push(`--user-data-dir=${opts.profileDir}`);
 
   if (opts.headless) {
     flags.push('--headless=new');
@@ -436,7 +362,7 @@ async function verifyGrokAuth(client: CDPClient, verbose?: boolean): Promise<boo
   }
 }
 
-// ─── Grok.com UI automation ───────────────────────────────────────────────────
+// ─── Grok.com UI selectors ────────────────────────────────────────────────────
 
 const TEXTAREA_SELECTORS = [
   'textarea[data-testid="grok-compose-input"]',
@@ -462,37 +388,31 @@ const SUBMIT_SELECTORS = [
   'button[data-testid*="send"]',
 ];
 
+// Order matters: more specific first
 const RESPONSE_SELECTORS = [
-  // Grok-specific
+  '[class*="response"][class*="content"]',
   '[data-testid="grok-response-content"]',
   '[data-testid="responseText"]',
   '[data-testid="response-content"]',
   '[data-testid="message-content"]',
   '[data-testid="assistant-message"]',
-  // Generic message containers
   '[data-message-role="assistant"]',
   '[data-role="assistant"]',
   '.response-content',
   '.message-content',
-  // Article-based layouts
   'article[data-testid*="response"]',
   'article[data-testid*="message"]',
   '[role="article"]',
-  // Common AI chat patterns
   '.prose',
   '.markdown-body',
   '[class*="message"][class*="assistant"]',
-  '[class*="response"][class*="content"]',
-  '[class*="assistant"][class*="message"]',
-  // Grok.com / chat UI fallbacks
   '[class*="assistant"] [class*="content"]',
-  '[class*="response"]',
   'div[class*="markdown"]',
   'main article',
   'section[role="region"] article',
 ];
 
-// Selectors indicating Grok is still generating
+// Loading indicators — excludes Stop button (stays visible after generation)
 const LOADING_SELECTORS = [
   '[data-testid="grok-streaming-indicator"]',
   '[data-testid="loading"]',
@@ -502,8 +422,6 @@ const LOADING_SELECTORS = [
   '[aria-label*="Loading"]',
   '[aria-label*="Generating"]',
   '[aria-label*="Thinking"]',
-  '[aria-label*="Stop"]',
-  'button[aria-label*="Stop"]',
   'svg[class*="animate-spin"]',
   'svg[class*="spinner"]',
   '.loading-indicator',
@@ -511,6 +429,8 @@ const LOADING_SELECTORS = [
   '[class*="thinking"]',
   '[class*="generating"]',
 ];
+
+// ─── DOM helpers ──────────────────────────────────────────────────────────────
 
 async function findElement(client: CDPClient, selectors: string[]): Promise<string | null> {
   const { Runtime } = client;
@@ -526,17 +446,17 @@ async function findElement(client: CDPClient, selectors: string[]): Promise<stri
   return null;
 }
 
-async function pasteText(
-  client: CDPClient,
-  selector: string,
-  text: string,
-  verbose?: boolean,
-): Promise<void> {
+async function clickElement(client: CDPClient, selector: string): Promise<void> {
+  const { Runtime } = client;
+  await Runtime.evaluate({
+    expression: `document.querySelector(${JSON.stringify(selector)})?.click()`,
+  });
+}
+
+async function pasteText(client: CDPClient, selector: string, text: string, verbose?: boolean): Promise<void> {
   const { Runtime } = client;
 
-  await Runtime.evaluate({
-    expression: `document.querySelector(${JSON.stringify(selector)})?.focus()`,
-  });
+  await Runtime.evaluate({ expression: `document.querySelector(${JSON.stringify(selector)})?.focus()` });
   await sleep(200);
 
   const isContentEditable = await Runtime.evaluate({
@@ -580,34 +500,286 @@ async function pasteText(
   await sleep(300);
 }
 
-async function clickElement(client: CDPClient, selector: string): Promise<void> {
+// ─── Mode toggles ─────────────────────────────────────────────────────────────
+
+async function enableThinkMode(client: CDPClient, log: (msg: string) => void): Promise<void> {
   const { Runtime } = client;
-  await Runtime.evaluate({
-    expression: `document.querySelector(${JSON.stringify(selector)})?.click()`,
+  const THINK_SELECTORS = [
+    'button[data-testid="think-toggle"]',
+    'button[aria-label*="Think"]',
+    'button[aria-label*="think"]',
+    'button[title*="Think"]',
+    '[data-testid*="think"]',
+    'button[class*="think"]',
+  ];
+  const result = await Runtime.evaluate({
+    expression: `
+      (function() {
+        const sels = ${JSON.stringify(THINK_SELECTORS)};
+        for (const sel of sels) {
+          try {
+            const btn = document.querySelector(sel);
+            if (btn) {
+              const isActive = btn.getAttribute('aria-pressed') === 'true'
+                || btn.classList.contains('active')
+                || btn.getAttribute('data-active') === 'true';
+              if (!isActive) btn.click();
+              return sel;
+            }
+          } catch {}
+        }
+        return null;
+      })()
+    `,
+    returnByValue: true,
   });
+  if (result.result?.value) {
+    log(`[mode] Think mode enabled (${result.result.value})`);
+    await sleep(500);
+  } else {
+    log('[mode] Think toggle not found — may already be active or selector changed');
+  }
 }
 
-async function captureResponse(
-  client: CDPClient,
-  timeoutMs: number,
-  verbose?: boolean,
-): Promise<string> {
+async function enableDeepSearch(client: CDPClient, log: (msg: string) => void): Promise<void> {
+  const { Runtime } = client;
+  const DEEPSEARCH_SELECTORS = [
+    'button[data-testid="deepsearch-toggle"]',
+    'button[data-testid="deep-search-toggle"]',
+    'button[aria-label*="DeepSearch"]',
+    'button[aria-label*="Deep Search"]',
+    'button[aria-label*="deep search"]',
+    'button[title*="DeepSearch"]',
+    'button[title*="Deep Search"]',
+    '[data-testid*="deepsearch"]',
+    '[data-testid*="deep-search"]',
+    'button[class*="deepsearch"]',
+    'button[class*="deep-search"]',
+  ];
+  const result = await Runtime.evaluate({
+    expression: `
+      (function() {
+        const sels = ${JSON.stringify(DEEPSEARCH_SELECTORS)};
+        for (const sel of sels) {
+          try {
+            const btn = document.querySelector(sel);
+            if (btn) {
+              const isActive = btn.getAttribute('aria-pressed') === 'true'
+                || btn.classList.contains('active')
+                || btn.getAttribute('data-active') === 'true';
+              if (!isActive) btn.click();
+              return sel;
+            }
+          } catch {}
+        }
+        return null;
+      })()
+    `,
+    returnByValue: true,
+  });
+  if (result.result?.value) {
+    log(`[mode] DeepSearch enabled (${result.result.value})`);
+    await sleep(500);
+  } else {
+    log('[mode] DeepSearch toggle not found — may already be active or selector changed');
+  }
+}
+
+// ─── Submit helper ────────────────────────────────────────────────────────────
+
+async function submitPrompt(client: CDPClient, textareaSel: string, log: (msg: string) => void): Promise<void> {
+  const { Runtime, Input } = client;
+  log('[browser] Submitting...');
+
+  try {
+    const submitSel = await waitFor(
+      async () => {
+        for (const sel of SUBMIT_SELECTORS) {
+          const result = await Runtime.evaluate({
+            expression: `
+              (function() {
+                const btn = document.querySelector(${JSON.stringify(sel)});
+                return btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true' ? true : null;
+              })()
+            `,
+            returnByValue: true,
+          });
+          if (result.result?.value === true) return sel;
+        }
+        return null;
+      },
+      12_000,
+      400,
+    );
+    await clickElement(client, submitSel);
+    log(`[browser] Clicked submit: ${submitSel}`);
+  } catch {
+    log('[browser] Submit button not found — trying Enter key');
+    await Runtime.evaluate({ expression: `document.querySelector(${JSON.stringify(textareaSel)})?.focus()` });
+    await sleep(100);
+    await Input.dispatchKeyEvent({ type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+    await sleep(80);
+    await Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+  }
+}
+
+// ─── Image generation ─────────────────────────────────────────────────────────
+
+async function captureGeneratedImage(client: CDPClient, timeoutMs: number, log: (msg: string) => void): Promise<string | null> {
+  const { Runtime } = client;
+  const deadline = Date.now() + timeoutMs;
+  log('[imagine] Waiting for generated image...');
+
+  while (Date.now() < deadline) {
+    try {
+      const result = await Runtime.evaluate({
+        expression: `
+          (function() {
+            const imgs = document.querySelectorAll([
+              '[data-testid*="generated-image"] img',
+              '[data-testid*="image-result"] img',
+              '.response-content img',
+              '[class*="generated"] img',
+              '[class*="image-result"] img',
+              'article img[src*="blob:"]',
+              'article img[src*="http"]',
+              '[role="article"] img',
+            ].join(','));
+            for (const img of imgs) {
+              const src = img.src || img.getAttribute('src') || '';
+              const w = img.naturalWidth || img.width || 0;
+              const h = img.naturalHeight || img.height || 0;
+              if (src && (w > 100 || h > 100 || src.includes('blob:'))) return src;
+            }
+            const links = document.querySelectorAll('a[download][href*="blob:"], a[download][href*=".png"], a[download][href*=".jpg"]');
+            if (links.length > 0) return (links[0] as HTMLAnchorElement).href;
+            return null;
+          })()
+        `,
+        returnByValue: true,
+      });
+      const url = result.result?.value as string | null;
+      if (url) {
+        log(`[imagine] Image found: ${url.slice(0, 80)}...`);
+        return url;
+      }
+    } catch (err) {
+      log(`[imagine] Poll error: ${(err as Error).message}`);
+    }
+    await sleep(1000);
+  }
+  log('[imagine] Timed out waiting for image');
+  return null;
+}
+
+async function downloadImage(url: string, outputPath: string, log: (msg: string) => void): Promise<void> {
+  const fsMod = await import('fs');
+  const pathMod = await import('path');
+  fsMod.default.mkdirSync(pathMod.default.dirname(outputPath), { recursive: true });
+
+  if (url.startsWith('http')) {
+    const https = await import('https');
+    const http = await import('http');
+    const protocol = url.startsWith('https') ? https.default : http.default;
+    await new Promise<void>((resolve, reject) => {
+      const file = fsMod.default.createWriteStream(outputPath);
+      protocol.get(url, (res) => {
+        res.pipe(file);
+        file.on('finish', () => { file.close(); resolve(); });
+      }).on('error', reject);
+    });
+    log(`[imagine] Image saved to: ${outputPath}`);
+  } else {
+    log(`[imagine] Blob URL — open browser to save manually`);
+    log(`[imagine] Blob URL: ${url}`);
+  }
+}
+
+// ─── Read Aloud ───────────────────────────────────────────────────────────────
+
+async function triggerReadAloud(client: CDPClient, outputPath: string, log: (msg: string) => void): Promise<void> {
+  const { Runtime, Network } = client;
+  const READ_ALOUD_SELECTORS = [
+    'button[aria-label*="Read aloud"]',
+    'button[aria-label*="Read Aloud"]',
+    'button[data-testid*="read-aloud"]',
+    'button[data-testid*="tts"]',
+    'button[title*="Read aloud"]',
+    '[class*="read-aloud"]',
+    '[class*="tts"] button',
+  ];
+
+  log('[read-aloud] Looking for Read Aloud button...');
+  let audioUrl: string | null = null;
+
+  const requestHandler = (params: any) => {
+    const url: string = params.request?.url ?? '';
+    if (url.includes('.mp3') || url.includes('audio') || url.includes('tts') || url.includes('speech')) {
+      audioUrl = url;
+      log(`[read-aloud] Audio URL intercepted: ${url.slice(0, 80)}`);
+    }
+  };
+  Network.requestWillBeSent(requestHandler);
+
+  const result = await Runtime.evaluate({
+    expression: `
+      (function() {
+        const sels = ${JSON.stringify(READ_ALOUD_SELECTORS)};
+        for (const sel of sels) {
+          try {
+            const articles = document.querySelectorAll('[role="article"], article');
+            const last = articles[articles.length - 1];
+            const container = last || document;
+            const btn = container.querySelector(sel);
+            if (btn) { btn.click(); return sel; }
+          } catch {}
+        }
+        return null;
+      })()
+    `,
+    returnByValue: true,
+  });
+
+  if (!result.result?.value) {
+    log('[read-aloud] Read Aloud button not found');
+    return;
+  }
+
+  log(`[read-aloud] Clicked Read Aloud, waiting for audio...`);
+  const deadline = Date.now() + 15_000;
+  while (!audioUrl && Date.now() < deadline) await sleep(500);
+
+  if (audioUrl) {
+    const fsMod = await import('fs');
+    if (outputPath.endsWith('.mp3') || outputPath.endsWith('.wav')) {
+      await downloadImage(audioUrl, outputPath, log);
+    } else {
+      fsMod.default.writeFileSync(outputPath, audioUrl, 'utf-8');
+      log(`[read-aloud] Audio URL saved to: ${outputPath}`);
+    }
+  } else {
+    log('[read-aloud] No audio URL captured — may require premium or selector update');
+  }
+}
+
+// ─── Response capture ─────────────────────────────────────────────────────────
+
+async function captureResponse(client: CDPClient, timeoutMs: number, verbose?: boolean): Promise<string> {
   const { Runtime } = client;
   const deadline = Date.now() + timeoutMs;
   const startTime = Date.now();
   let lastText = '';
   let stableCount = 0;
-  const STABLE_NEEDED = 6; // 6 × 500ms = 3s stable = done
-  // After 12s, accept stable text even if a loading indicator is still present
-  const STABLE_IGNORE_LOADING_AFTER_MS = 12_000;
+  const STABLE_NEEDED = 3;                        // 3 × 300ms ≈ 1s stable
+  const STABLE_IGNORE_LOADING_AFTER_MS = 4_000;   // after 4s ignore loading indicator
+  const POLL_MS = 300;
 
   if (verbose) console.log('[browser] Polling for response...');
-
   let matchedSelector = '';
+  let lastDomHintBucket = -1;
 
   while (Date.now() < deadline) {
     try {
-      // ── Strategy 1: known selectors ────────────────────────────────────
       const result = await Runtime.evaluate({
         expression: `
           (function() {
@@ -622,8 +794,7 @@ async function captureResponse(
                 }
               } catch(e) {}
             }
-
-            // ── Strategy 2: largest text block not in input area ──────────
+            // Fallback: largest text block not in input area
             const allDivs = document.querySelectorAll('div, section, main');
             let best = { text: '', sel: '', len: 0 };
             for (const el of allDivs) {
@@ -631,11 +802,10 @@ async function captureResponse(
               if (el.closest('textarea, [contenteditable], form, header, nav, footer')) continue;
               const text = (el.innerText || '').trim();
               if (text.length > best.len && text.length > 50) {
-                best = { text, sel: el.tagName + '.' + el.className.slice(0, 40), len: text.length };
+                best = { text, sel: el.tagName + '.' + el.className.slice(0,40), len: text.length };
               }
             }
             if (best.len > 50) return best;
-
             return null;
           })()
         `,
@@ -644,20 +814,16 @@ async function captureResponse(
 
       const val = result.result?.value as { text: string; sel: string } | null;
       const currentText = val?.text ?? '';
-
       if (val?.sel && val.sel !== matchedSelector) {
         matchedSelector = val.sel;
         if (verbose) console.log(`[browser] Matched selector: ${matchedSelector}`);
       }
 
-      // ── Check loading state ────────────────────────────────────────────
       const loadResult = await Runtime.evaluate({
         expression: `
           (function() {
             const loadSels = ${JSON.stringify(LOADING_SELECTORS)};
-            if (loadSels.some(s => { try { return document.querySelector(s) !== null; } catch { return false; } })) {
-              return true;
-            }
+            if (loadSels.some(s => { try { return document.querySelector(s) !== null; } catch { return false; } })) return true;
             const submitSels = ${JSON.stringify(SUBMIT_SELECTORS)};
             for (const s of submitSels) {
               try {
@@ -672,17 +838,15 @@ async function captureResponse(
       });
       const isLoading = loadResult.result?.value === true;
       const elapsed = Date.now() - startTime;
-      const acceptDespiteLoading = elapsed > STABLE_IGNORE_LOADING_AFTER_MS;
+      const acceptStableDespiteLoading = elapsed > STABLE_IGNORE_LOADING_AFTER_MS;
 
-      // Progress log
       if (verbose && currentText.length > 0 && currentText.length !== lastText.length) {
         process.stdout.write(`\r[browser] ${currentText.length} chars received...`);
       }
 
       if (currentText.length > 20) {
         const isStable = currentText === lastText;
-        const considerDone = isStable && (!isLoading || acceptDespiteLoading);
-
+        const considerDone = isStable && (!isLoading || acceptStableDespiteLoading);
         if (isStable) {
           stableCount++;
           if (verbose) process.stdout.write(`\r[browser] Stable ${stableCount}/${STABLE_NEEDED}...`);
@@ -695,7 +859,6 @@ async function captureResponse(
           lastText = currentText;
         }
       } else if (currentText.length === 0 && lastText.length === 0) {
-        // Nothing yet — check for mid-session captcha
         const midChallenge = await detectChallenge(client);
         if (midChallenge !== 'none') {
           console.log(`\n  ⏸  Challenge appeared: ${midChallenge}`);
@@ -703,10 +866,11 @@ async function captureResponse(
           await sleep(2000);
         }
 
-        // Dump DOM hint every 10s in verbose mode
         if (verbose) {
-          const elapsedSec = Math.round((Date.now() - startTime) / 1000);
-          if (elapsedSec > 0 && elapsedSec % 10 === 0) {
+          const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
+          const bucket = Math.floor(elapsedSec / 10);
+          if (bucket > lastDomHintBucket) {
+            lastDomHintBucket = bucket;
             const domHint = await Runtime.evaluate({
               expression: `
                 (function() {
@@ -714,18 +878,14 @@ async function captureResponse(
                   const els = document.querySelectorAll('[class*="message"],[class*="response"],[class*="chat"],[class*="answer"],[role="article"],[role="main"],article,main');
                   for (const el of els) {
                     const text = (el.innerText || '').trim().slice(0, 60);
-                    if (text.length > 5) {
-                      result.push(el.tagName + '[' + (el.getAttribute('class') || '').slice(0, 50) + '] = "' + text + '"');
-                    }
+                    if (text.length > 5) result.push(el.tagName + '[' + (el.getAttribute('class') || '').slice(0,50) + '] = "' + text + '"');
                   }
                   return result.slice(0, 8).join('\\n');
                 })()
               `,
               returnByValue: true,
             });
-            if (domHint.result?.value) {
-              console.log('\n[browser] DOM hint:\n' + domHint.result.value);
-            }
+            if (domHint.result?.value) console.log('\n[browser] DOM hint:\n' + domHint.result.value);
           }
         }
       }
@@ -733,7 +893,7 @@ async function captureResponse(
       if (verbose) console.warn(`\n[browser] Poll error: ${(err as Error).message}`);
     }
 
-    await sleep(500);
+    await sleep(POLL_MS);
   }
 
   if (lastText) {
@@ -741,24 +901,13 @@ async function captureResponse(
     return lastText;
   }
 
-  // Last resort: dump page body for debugging
   try {
-    const dump = await Runtime.evaluate({
-      expression: `document.body?.innerText?.slice(0, 2000) ?? ''`,
-      returnByValue: true,
-    });
+    const dump = await Runtime.evaluate({ expression: `document.body?.innerText?.slice(0, 2000) ?? ''`, returnByValue: true });
     const bodyText = (dump.result?.value as string) ?? '';
-    if (bodyText.length > 100) {
-      console.warn('[browser] No response captured. Page body preview:');
-      console.warn(bodyText.slice(0, 500));
-    }
+    if (bodyText.length > 100) { console.warn('[browser] Page body preview:'); console.warn(bodyText.slice(0, 500)); }
   } catch { /* ignore */ }
 
-  throw new Error(
-    `Response capture timed out after ${timeoutMs}ms.\n` +
-    `  Tip: run with -v (--verbose) to see DOM hints and matched selectors.\n` +
-    `  Or file a bug at https://github.com/Fon-1/grok-cli/issues`
-  );
+  throw new Error(`Response capture timed out after ${timeoutMs}ms.\n  Tip: run with -v to see DOM hints.\n  Bug: https://github.com/Fon-1/grok-cli/issues`);
 }
 
 // ─── Main entry ───────────────────────────────────────────────────────────────
@@ -794,7 +943,6 @@ export async function runGrokBrowser(
         fs.mkdirSync(profileDir, { recursive: true });
         log(`[browser] Using persistent profile: ${profileDir}`);
       }
-
       const { launcher: l, port } = await launchChrome({
         chromePath: opts.chromePath,
         profileDir,
@@ -817,38 +965,28 @@ export async function runGrokBrowser(
 
     // ── 3. Resolve and set cookies ─────────────────────────────────────────
     const cookies = await resolveCookies(opts, log);
-    if (cookies.length > 0) {
-      await setCookies(client, cookies, opts.verbose);
-    }
+    if (cookies.length > 0) await setCookies(client, cookies, opts.verbose);
 
     // ── 4. Navigate to grok.com ────────────────────────────────────────────
     const grokUrl = opts.grokUrl || 'https://grok.com';
     log(`[browser] Navigating to ${grokUrl}`);
     await Page.navigate({ url: grokUrl });
-
-    try {
-      await Promise.race([Page.loadEventFired(), sleep(15_000)]);
-    } catch { /* ignore */ }
+    try { await Promise.race([Page.loadEventFired(), sleep(15_000)]); } catch { /* ignore */ }
     await sleep(2500);
 
-    // ── 5. Handle any initial challenges ──────────────────────────────────
+    // ── 5. Handle challenges ───────────────────────────────────────────────
     log('[browser] Checking for challenges...');
     await checkAndHandleChallenges(client, opts, log);
     await sleep(1000);
 
     // ── 6. Manual login wait ───────────────────────────────────────────────
     if (opts.manualLogin) {
-      console.log(
-        '\n  ⏸  Manual login mode\n' +
-        '     Please sign in to grok.com in the browser window.\n' +
-        '     Waiting...\n'
-      );
+      console.log('\n  ⏸  Manual login mode\n     Please sign in to grok.com, then wait...\n');
       await waitFor(
         async () => {
           const ch = await detectChallenge(client);
           if (ch !== 'none') await handleChallenge(client, ch, opts, log);
-          const authed = await verifyGrokAuth(client, opts.verbose);
-          return authed ? true : null;
+          return (await verifyGrokAuth(client, opts.verbose)) ? true : null;
         },
         opts.browserTimeout,
         3000,
@@ -856,75 +994,51 @@ export async function runGrokBrowser(
       log('[browser] Authenticated ✓');
     } else {
       const authed = await verifyGrokAuth(client, opts.verbose);
-      if (!authed) {
-        log('[browser] Warning: auth not confirmed — proceeding (may fail if not logged in)');
-      } else {
-        log('[browser] Authenticated ✓');
-      }
+      log(authed ? '[browser] Authenticated ✓' : '[browser] Warning: auth not confirmed — proceeding');
     }
 
     // ── 7. Find textarea ───────────────────────────────────────────────────
     log('[browser] Looking for input area...');
     let textareaSel: string;
     try {
-      textareaSel = await waitFor(
-        () => findElement(client, TEXTAREA_SELECTORS),
-        30_000,
-        1000,
-      );
+      textareaSel = await waitFor(() => findElement(client, TEXTAREA_SELECTORS), 30_000, 1000);
     } catch {
       await checkAndHandleChallenges(client, opts, log);
-      textareaSel = await waitFor(
-        () => findElement(client, TEXTAREA_SELECTORS),
-        15_000,
-        1000,
-      );
+      textareaSel = await waitFor(() => findElement(client, TEXTAREA_SELECTORS), 15_000, 1000);
     }
     log(`[browser] Found input: ${textareaSel}`);
 
-    // ── 8. Enable mode toggles (Think / DeepSearch) ────────────────────────
-    if (opts.think) {
-      await enableThinkMode(client, log);
-    }
-    if (opts.deepSearch) {
-      await enableDeepSearch(client, log);
-    }
+    // ── 8. Enable mode toggles ─────────────────────────────────────────────
+    if (opts.think) await enableThinkMode(client, log);
+    if (opts.deepSearch) await enableDeepSearch(client, log);
 
-    // ── 9. Imagine mode — generate image instead of text response ──────────
+    // ── 9. Imagine mode ────────────────────────────────────────────────────
     if (opts.imagine) {
       log('[browser] Image generation mode (--imagine)');
-      const imagePath = opts.imagine;
       await pasteText(client, textareaSel, bundleText, opts.verbose);
       await submitPrompt(client, textareaSel, log);
       await sleep(2000);
       const imageUrl = await captureGeneratedImage(client, opts.responseTimeout, log);
-      if (imageUrl) {
-        await downloadImage(imageUrl, imagePath, log);
-      }
+      if (imageUrl) await downloadImage(imageUrl, opts.imagine, log);
       const durationMs = Date.now() - startTime;
-      return { answer: `Image saved to: ${imagePath}\nSource: ${imageUrl ?? 'unknown'}`, durationMs };
+      return { answer: `Image saved to: ${opts.imagine}\nSource: ${imageUrl ?? 'unknown'}`, durationMs };
     }
 
-    // ── 10. Paste bundle ───────────────────────────────────────────────────
+    // ── 10. Paste + Submit ─────────────────────────────────────────────────
     log(`[browser] Pasting bundle (${bundleText.length.toLocaleString()} chars)...`);
     await pasteText(client, textareaSel, bundleText, opts.verbose);
-
-    // ── 11. Submit ─────────────────────────────────────────────────────────
     await submitPrompt(client, textareaSel, log);
     await sleep(1500);
 
-    // ── 12. Capture response ───────────────────────────────────────────────
+    // ── 11. Capture response ───────────────────────────────────────────────
     log('[browser] Waiting for Grok response...');
     const answer = await captureResponse(client, opts.responseTimeout, opts.verbose);
 
-    // ── 13. Read Aloud (optional) ──────────────────────────────────────────
-    if (opts.readAloud) {
-      await triggerReadAloud(client, opts.readAloud, log);
-    }
+    // ── 12. Read Aloud (optional) ──────────────────────────────────────────
+    if (opts.readAloud) await triggerReadAloud(client, opts.readAloud, log);
 
     const durationMs = Date.now() - startTime;
     log(`[browser] Done in ${(durationMs / 1000).toFixed(1)}s`);
-
     return { answer, durationMs };
 
   } finally {
@@ -935,350 +1049,6 @@ export async function runGrokBrowser(
       log('[browser] Keeping browser open (--keep-browser)');
       try { await client?.close(); } catch { /* ignore */ }
     }
-  }
-}
-
-// ─── Mode toggles ─────────────────────────────────────────────────────────────
-
-/**
- * Enable Grok "Think" mode by clicking the Think toggle button before submitting.
- * Selectors target the toolbar button that activates extended reasoning.
- */
-async function enableThinkMode(client: CDPClient, log: (msg: string) => void): Promise<void> {
-  const { Runtime } = client;
-  const THINK_SELECTORS = [
-    'button[data-testid="think-toggle"]',
-    'button[aria-label*="Think"]',
-    'button[aria-label*="think"]',
-    'button[title*="Think"]',
-    '[data-testid*="think"]',
-    'button[class*="think"]',
-  ];
-
-  const result = await Runtime.evaluate({
-    expression: `
-      (function() {
-        const sels = ${JSON.stringify(THINK_SELECTORS)};
-        for (const sel of sels) {
-          try {
-            const btn = document.querySelector(sel);
-            if (btn) {
-              // Only click if not already active
-              const isActive = btn.getAttribute('aria-pressed') === 'true'
-                || btn.classList.contains('active')
-                || btn.getAttribute('data-active') === 'true';
-              if (!isActive) btn.click();
-              return sel;
-            }
-          } catch {}
-        }
-        return null;
-      })()
-    `,
-    returnByValue: true,
-  });
-
-  if (result.result?.value) {
-    log(`[mode] Think mode enabled (${result.result.value})`);
-    await sleep(500);
-  } else {
-    log('[mode] Think toggle not found — may already be active or selector changed');
-  }
-}
-
-/**
- * Enable Grok "DeepSearch" mode by clicking the DeepSearch toggle button.
- */
-async function enableDeepSearch(client: CDPClient, log: (msg: string) => void): Promise<void> {
-  const { Runtime } = client;
-  const DEEPSEARCH_SELECTORS = [
-    'button[data-testid="deepsearch-toggle"]',
-    'button[data-testid="deep-search-toggle"]',
-    'button[aria-label*="DeepSearch"]',
-    'button[aria-label*="Deep Search"]',
-    'button[aria-label*="deep search"]',
-    'button[title*="DeepSearch"]',
-    'button[title*="Deep Search"]',
-    '[data-testid*="deepsearch"]',
-    '[data-testid*="deep-search"]',
-    'button[class*="deepsearch"]',
-    'button[class*="deep-search"]',
-  ];
-
-  const result = await Runtime.evaluate({
-    expression: `
-      (function() {
-        const sels = ${JSON.stringify(DEEPSEARCH_SELECTORS)};
-        for (const sel of sels) {
-          try {
-            const btn = document.querySelector(sel);
-            if (btn) {
-              const isActive = btn.getAttribute('aria-pressed') === 'true'
-                || btn.classList.contains('active')
-                || btn.getAttribute('data-active') === 'true';
-              if (!isActive) btn.click();
-              return sel;
-            }
-          } catch {}
-        }
-        return null;
-      })()
-    `,
-    returnByValue: true,
-  });
-
-  if (result.result?.value) {
-    log(`[mode] DeepSearch enabled (${result.result.value})`);
-    await sleep(500);
-  } else {
-    log('[mode] DeepSearch toggle not found — may already be active or selector changed');
-  }
-}
-
-// ─── Submit helper ────────────────────────────────────────────────────────────
-
-async function submitPrompt(
-  client: CDPClient,
-  textareaSel: string,
-  log: (msg: string) => void,
-): Promise<void> {
-  const { Runtime, Input } = client;
-  log('[browser] Submitting...');
-
-  try {
-    const submitSel = await waitFor(
-      async () => {
-        for (const sel of SUBMIT_SELECTORS) {
-          const result = await Runtime.evaluate({
-            expression: `
-              (function() {
-                const btn = document.querySelector(${JSON.stringify(sel)});
-                return btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true' ? true : null;
-              })()
-            `,
-            returnByValue: true,
-          });
-          if (result.result?.value === true) return sel;
-        }
-        return null;
-      },
-      12_000,
-      400,
-    );
-    await clickElement(client, submitSel);
-    log(`[browser] Clicked submit: ${submitSel}`);
-  } catch {
-    log('[browser] Submit button not found — trying Enter key');
-    await Runtime.evaluate({
-      expression: `document.querySelector(${JSON.stringify(textareaSel)})?.focus()`,
-    });
-    await sleep(100);
-    await Input.dispatchKeyEvent({ type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-    await sleep(80);
-    await Input.dispatchKeyEvent({ type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-  }
-}
-
-// ─── Image generation ─────────────────────────────────────────────────────────
-
-/**
- * Wait for Grok to generate an image and return its URL.
- * Looks for <img> tags that appear in the response area after submission.
- */
-async function captureGeneratedImage(
-  client: CDPClient,
-  timeoutMs: number,
-  log: (msg: string) => void,
-): Promise<string | null> {
-  const { Runtime } = client;
-  const deadline = Date.now() + timeoutMs;
-  log('[imagine] Waiting for generated image...');
-
-  while (Date.now() < deadline) {
-    try {
-      const result = await Runtime.evaluate({
-        expression: `
-          (function() {
-            // Look for generated images in response area
-            // Grok typically renders them as <img> inside the chat area
-            const imgs = document.querySelectorAll([
-              '[data-testid*="generated-image"] img',
-              '[data-testid*="image-result"] img',
-              '.response-content img',
-              '[class*="generated"] img',
-              '[class*="image-result"] img',
-              'article img[src*="blob:"]',
-              'article img[src*="http"]',
-              '[role="article"] img',
-            ].join(','));
-
-            for (const img of imgs) {
-              const src = img.src || img.getAttribute('src') || '';
-              // Skip tiny icons / avatars (< 100px usually)
-              const w = img.naturalWidth || img.width || 0;
-              const h = img.naturalHeight || img.height || 0;
-              if (src && (w > 100 || h > 100 || src.includes('blob:'))) {
-                return src;
-              }
-            }
-
-            // Also check for download links
-            const links = document.querySelectorAll('a[download][href*="blob:"], a[download][href*=".png"], a[download][href*=".jpg"]');
-            if (links.length > 0) return (links[0] as HTMLAnchorElement).href;
-
-            return null;
-          })()
-        `,
-        returnByValue: true,
-      });
-
-      const url = result.result?.value as string | null;
-      if (url) {
-        log(`[imagine] Image found: ${url.slice(0, 80)}...`);
-        return url;
-      }
-
-      // Check loading state
-      const loading = await Runtime.evaluate({
-        expression: `document.querySelector('[aria-label*="Generating"], [data-testid*="loading"], svg[class*="animate-spin"]') !== null`,
-        returnByValue: true,
-      });
-      if (loading.result?.value) {
-        log('[imagine] Still generating...');
-      }
-    } catch (err) {
-      log(`[imagine] Poll error: ${(err as Error).message}`);
-    }
-
-    await sleep(1000);
-  }
-
-  log('[imagine] Timed out waiting for image');
-  return null;
-}
-
-/**
- * Download an image URL (http/https or blob:) to a local file.
- * For blob: URLs we use CDP to fetch the blob data via JS.
- */
-async function downloadImage(
-  url: string,
-  outputPath: string,
-  log: (msg: string) => void,
-): Promise<void> {
-  const fs = await import('fs');
-  const path = await import('path');
-
-  // Ensure output directory exists
-  fs.default.mkdirSync(path.default.dirname(outputPath), { recursive: true });
-
-  if (url.startsWith('http')) {
-    // Fetch via Node https
-    const https = await import('https');
-    const http = await import('http');
-    const protocol = url.startsWith('https') ? https.default : http.default;
-
-    await new Promise<void>((resolve, reject) => {
-      const file = fs.default.createWriteStream(outputPath);
-      protocol.get(url, (res) => {
-        res.pipe(file);
-        file.on('finish', () => { file.close(); resolve(); });
-      }).on('error', reject);
-    });
-
-    log(`[imagine] Image saved to: ${outputPath}`);
-  } else {
-    log(`[imagine] Blob URL cannot be downloaded directly — open browser to save manually`);
-    log(`[imagine] Blob URL: ${url}`);
-  }
-}
-
-// ─── Read Aloud ───────────────────────────────────────────────────────────────
-
-/**
- * Click the "Read Aloud" button on the last Grok response and
- * intercept the audio network request URL.
- */
-async function triggerReadAloud(
-  client: CDPClient,
-  outputPath: string,
-  log: (msg: string) => void,
-): Promise<void> {
-  const { Runtime, Network, Page } = client;
-
-  const READ_ALOUD_SELECTORS = [
-    'button[aria-label*="Read aloud"]',
-    'button[aria-label*="Read Aloud"]',
-    'button[data-testid*="read-aloud"]',
-    'button[data-testid*="tts"]',
-    'button[title*="Read aloud"]',
-    'button[title*="Read Aloud"]',
-    '[class*="read-aloud"]',
-    '[class*="tts"] button',
-  ];
-
-  log('[read-aloud] Looking for Read Aloud button...');
-
-  // Intercept audio requests
-  let audioUrl: string | null = null;
-  const requestHandler = (params: any) => {
-    const url: string = params.request?.url ?? '';
-    if (url.includes('.mp3') || url.includes('audio') || url.includes('tts') || url.includes('speech')) {
-      audioUrl = url;
-      log(`[read-aloud] Audio URL intercepted: ${url.slice(0, 80)}`);
-    }
-  };
-  Network.requestWillBeSent(requestHandler);
-
-  // Click the button
-  const result = await Runtime.evaluate({
-    expression: `
-      (function() {
-        const sels = ${JSON.stringify(READ_ALOUD_SELECTORS)};
-        for (const sel of sels) {
-          try {
-            // Find in the last message
-            const articles = document.querySelectorAll('[role="article"], article');
-            const last = articles[articles.length - 1];
-            const container = last || document;
-            const btn = container.querySelector(sel);
-            if (btn) { btn.click(); return sel; }
-          } catch {}
-        }
-        return null;
-      })()
-    `,
-    returnByValue: true,
-  });
-
-  if (!result.result?.value) {
-    log('[read-aloud] Read Aloud button not found — selector may have changed');
-    return;
-  }
-
-  log(`[read-aloud] Clicked Read Aloud (${result.result.value}), waiting for audio...`);
-
-  // Wait up to 15s for audio URL
-  const deadline = Date.now() + 15_000;
-  while (!audioUrl && Date.now() < deadline) {
-    await sleep(500);
-  }
-
-  // Remove listener
-  try { Network.requestWillBeSent.call(null); } catch { /* ignore */ }
-
-  if (audioUrl && outputPath) {
-    if (outputPath.endsWith('.mp3') || outputPath.endsWith('.wav')) {
-      // Try to download
-      await downloadImage(audioUrl, outputPath, log);
-    } else {
-      // Save URL to text file
-      const fs = await import('fs');
-      fs.default.writeFileSync(outputPath, audioUrl, 'utf-8');
-      log(`[read-aloud] Audio URL saved to: ${outputPath}`);
-    }
-  } else if (!audioUrl) {
-    log('[read-aloud] No audio URL captured — may require premium account or selector update');
   }
 }
 
@@ -1309,10 +1079,7 @@ async function resolveCookies(opts: GrokOptions, log: (msg: string) => void): Pr
 
   if (!opts.manualLogin && !opts.remoteChrome) {
     const { getDefaultChromeCookiePaths, readChromeCookies } = await import('./cookies.js');
-    const cookieDbPaths = opts.cookiePath
-      ? [opts.cookiePath]
-      : getDefaultChromeCookiePaths();
-
+    const cookieDbPaths = opts.cookiePath ? [opts.cookiePath] : getDefaultChromeCookiePaths();
     for (const dbPath of cookieDbPaths) {
       if (!fs.existsSync(dbPath)) continue;
       try {
