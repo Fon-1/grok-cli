@@ -6,244 +6,728 @@ Inspired by [oracle](https://github.com/steipete/oracle) (for ChatGPT), this is 
 
 ---
 
-## How it works
+## Mục lục
 
-1. Resolves file globs → reads content → builds a markdown bundle
-2. Launches Chrome (or attaches to an existing instance)
-3. Sets cookies from your Chrome profile / `~/.grok/cookies.json`
-4. Navigates to `grok.com`, pastes the bundle, submits
-5. Waits for the response and captures it
-6. Saves session to `~/.grok/sessions/`
-
----
-
-## Quick Start
-
-```bash
-# Install
-npm install -g grok-cli
-# or
-npx grok-cli -p "explain this code" --file src/app.ts
-
-# Check your setup
-grok init
-
-# Ask with files
-grok -p "review this PR for bugs" --file "src/**/*.ts" --file "!src/**/*.test.ts"
-
-# Dry-run: build bundle and copy to clipboard (paste into grok.com manually)
-grok -p "refactor this" --file src/utils.ts --dry-run --copy
-
-# Manual login (opens browser, wait for login, then sends)
-grok -p "explain the auth flow" --file src/auth.ts --manual-login
-
-# Headless (no visible window)
-grok -p "fix the types" --file src/types.ts --headless
-```
-
-Requires **Node 20+** and **Google Chrome**.
+- [Cách hoạt động](#cách-hoạt-động)
+- [Cài đặt](#cài-đặt)
+- [Bước 1 — Mở Chrome debug](#bước-1--mở-chrome-debug)
+- [Bước 2 — Đăng nhập Grok](#bước-2--đăng-nhập-grok)
+- [Bước 3 — Chạy lệnh](#bước-3--chạy-lệnh)
+- [Hỏi câu đơn giản](#hỏi-câu-đơn-giản)
+- [Đính kèm file](#đính-kèm-file)
+- [Các mode đặc biệt](#các-mode-đặc-biệt)
+- [Lưu kết quả](#lưu-kết-quả)
+- [Dry-run và Copy](#dry-run-và-copy)
+- [Quản lý session](#quản-lý-session)
+- [Xác thực (Authentication)](#xác-thực-authentication)
+- [Captcha & Bot Detection](#captcha--bot-detection)
+- [Tất cả flags](#tất-cả-flags)
+- [Troubleshooting](#troubleshooting)
 
 ---
 
-## Authentication Options
+## Cách hoạt động
 
-### Option 1 — Auto (Chrome profile, recommended)
-
-If you're already logged in to `grok.com` in Chrome, grok-cli reads your cookies automatically:
-
-```bash
-grok -p "your question" --file src/app.ts
+```
+Prompt + Files
+     │
+     ▼
+Bundle builder        ← Đọc files, build markdown context
+     │
+     ▼
+Chrome (CDP)          ← Attach vào Chrome đang chạy (hoặc launch mới)
+     │
+     ▼
+grok.com              ← Paste bundle vào textarea, submit
+     │
+     ▼
+Response capture      ← Poll DOM cho đến khi response ổn định
+     │
+     ▼
+Session saved         ← Lưu vào ~/.grok/sessions/
 ```
 
-Check if this works:
+---
+
+## Cài đặt
+
+**Yêu cầu:** Node.js 20+, Google Chrome
+
 ```bash
-grok cookies
+git clone https://github.com/Fon-1/grok-cli.git
+cd grok-cli
+npm install
+npm run build
 ```
 
-### Option 2 — `~/.grok/cookies.json`
+> **Windows:** Dùng `.\grok.ps1` thay vì `grok` để tránh conflict với tool khác.  
+> **macOS/Linux:** Chạy `npm link` để dùng lệnh `grok` toàn cục.
 
-Export your `grok.com` cookies as a `CookieParam[]` JSON array and save to `~/.grok/cookies.json`:
+---
 
+## Bước 1 — Mở Chrome debug
+
+Trước khi chạy bất kỳ lệnh nào cần browser, phải mở Chrome với remote debugging:
+
+### Windows
+
+```powershell
+.\start-chrome-debug.ps1
+```
+
+Script sẽ:
+1. Tìm Chrome trên máy
+2. Mở Chrome với `--remote-debugging-port=9222`
+3. Đợi đến khi port LISTENING
+4. Báo "Chrome debug sẵn sàng ✓"
+
+### macOS / Linux
+
+```bash
+# macOS
+/Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.grok/browser-profile" \
+  https://grok.com
+
+# Linux
+google-chrome \
+  --remote-debugging-port=9222 \
+  --user-data-dir="$HOME/.grok/browser-profile" \
+  https://grok.com
+```
+
+### Kiểm tra port đã mở chưa
+
+```powershell
+# Windows
+netstat -ano | findstr :9222
+# Phải thấy dòng LISTENING
+
+# macOS/Linux
+lsof -i :9222
+```
+
+---
+
+## Bước 2 — Đăng nhập Grok
+
+Sau khi Chrome mở, vào cửa sổ Chrome và đăng nhập vào [grok.com](https://grok.com) bằng tài khoản X (Twitter) của bạn. Chỉ cần đăng nhập **1 lần** — các lần sau Chrome nhớ session.
+
+---
+
+## Bước 3 — Chạy lệnh
+
+---
+
+## Hỏi câu đơn giản
+
+Câu hỏi không cần file đính kèm:
+
+```powershell
+# Windows
+.\grok.ps1 -p "Explain what is a closure in JavaScript" --remote-chrome 127.0.0.1:9222
+
+# macOS/Linux
+grok -p "Explain what is a closure in JavaScript" --remote-chrome 127.0.0.1:9222
+```
+
+**Kết quả:**
+```
+  grok 🤖  — Ask Grok when you're stuck
+
+  Building bundle...
+  Bundle: 0 file(s), 245 chars (~61 tokens)
+  Session: a1b2c3d4e5f6g7h8
+
+  Navigating to https://grok.com
+  Pasting bundle (245 chars)...
+  Waiting for Grok response...
+
+─── Grok Response ───────────────────────────────
+
+A closure in JavaScript is a function that retains access to variables
+from its outer scope even after the outer function has returned...
+
+─────────────────────────────────────────────────
+```
+
+---
+
+## Đính kèm file
+
+### 1 file cụ thể
+
+```powershell
+.\grok.ps1 -p "Explain what this function does" --file src/utils.ts --remote-chrome 127.0.0.1:9222
+```
+
+### Nhiều file
+
+```powershell
+.\grok.ps1 -p "How does authentication work in this project?" `
+  --file src/middleware/auth.ts `
+  --file src/pages/api/login.ts `
+  --file src/hooks/useAuth.ts `
+  --remote-chrome 127.0.0.1:9222
+```
+
+### Glob pattern — tất cả TypeScript files
+
+```powershell
+.\grok.ps1 -p "Review this codebase for potential bugs" `
+  --file "src/**/*.ts" `
+  --remote-chrome 127.0.0.1:9222
+```
+
+### Glob + Exclude
+
+```powershell
+# Bỏ qua test files
+.\grok.ps1 -p "Audit the code quality" `
+  --file "src/**/*.ts" `
+  --file "!src/**/*.test.ts" `
+  --file "!src/**/*.spec.ts" `
+  --remote-chrome 127.0.0.1:9222
+```
+
+### Cả thư mục
+
+```powershell
+.\grok.ps1 -p "What does the components folder do?" `
+  --file src/components `
+  --remote-chrome 127.0.0.1:9222
+```
+
+### Pipe từ stdin
+
+```powershell
+# Windows
+Get-Content error.log | .\grok.ps1 -p "What caused this error?" --remote-chrome 127.0.0.1:9222
+
+# macOS/Linux
+cat error.log | grok -p "What caused this error?" --remote-chrome 127.0.0.1:9222
+```
+
+---
+
+## Các mode đặc biệt
+
+### Think mode — Suy luận sâu
+
+Grok sẽ suy nghĩ kỹ hơn trước khi trả lời. Phù hợp với câu hỏi phức tạp, thuật toán, kiến trúc.
+
+```powershell
+.\grok.ps1 -p "What is the most efficient way to find the longest common subsequence?" `
+  --think `
+  --remote-chrome 127.0.0.1:9222
+```
+
+```powershell
+# Think + file code
+.\grok.ps1 -p "Find all potential race conditions in this code" `
+  --file src/store/actions.ts `
+  --think `
+  --remote-chrome 127.0.0.1:9222
+```
+
+### DeepSearch — Tìm kiếm web
+
+Grok tìm kiếm thông tin mới nhất trên internet trước khi trả lời. Phù hợp với câu hỏi về tin tức, thư viện mới, so sánh công nghệ.
+
+```powershell
+.\grok.ps1 -p "What are the latest features in React 19?" `
+  --deep-search `
+  --remote-chrome 127.0.0.1:9222
+```
+
+```powershell
+# DeepSearch để check security vulnerabilities
+.\grok.ps1 -p "Are there any known CVEs for express 4.18.2?" `
+  --deep-search `
+  --remote-chrome 127.0.0.1:9222
+```
+
+### Think + DeepSearch kết hợp
+
+```powershell
+.\grok.ps1 -p "Compare the performance benchmarks of Bun vs Node.js vs Deno in 2025" `
+  --think `
+  --deep-search `
+  --remote-chrome 127.0.0.1:9222
+```
+
+### Imagine — Tạo ảnh
+
+Grok tạo ảnh từ text prompt, tự động tải về máy.
+
+```powershell
+# Tạo ảnh lưu PNG
+.\grok.ps1 -p "A futuristic city on Mars at sunset, cinematic lighting, 4K" `
+  --imagine "C:\Users\darky\Pictures\mars-city.png" `
+  --remote-chrome 127.0.0.1:9222
+```
+
+```powershell
+# Logo cho project
+.\grok.ps1 -p "Minimalist logo for a CLI tool named 'grok', dark theme, tech aesthetic" `
+  --imagine "C:\Users\darky\Pictures\grok-logo.png" `
+  --remote-chrome 127.0.0.1:9222
+```
+
+**Kết quả:**
+```
+  Modes: Imagine → C:\Users\darky\Pictures\mars-city.png
+
+  [imagine] Waiting for generated image...
+  [imagine] Image found: https://...
+  [imagine] Image saved to: C:\Users\darky\Pictures\mars-city.png
+
+─── Grok Response ───────────────────────────────
+Image saved to: C:\Users\darky\Pictures\mars-city.png
+─────────────────────────────────────────────────
+```
+
+### Read Aloud — Đọc to
+
+Trigger nút Read Aloud của Grok và lưu URL audio.
+
+```powershell
+# Lưu URL audio vào file text
+.\grok.ps1 -p "Tell me a short story about a robot learning to code" `
+  --read-aloud "C:\Users\darky\audio-url.txt" `
+  --remote-chrome 127.0.0.1:9222
+```
+
+```powershell
+# Kết hợp: hỏi + đọc to
+.\grok.ps1 -p "Summarize the SOLID principles in simple terms" `
+  --read-aloud "C:\Users\darky\solid.txt" `
+  --remote-chrome 127.0.0.1:9222
+```
+
+---
+
+## Lưu kết quả
+
+### Lưu response ra file
+
+```powershell
+# Tạo unit tests và lưu
+.\grok.ps1 -p "Write comprehensive unit tests for all exported functions" `
+  --file src/utils.ts `
+  --write-output tests/utils.test.ts `
+  --remote-chrome 127.0.0.1:9222
+```
+
+```powershell
+# Tạo documentation
+.\grok.ps1 -p "Write JSDoc documentation for all functions in this file" `
+  --file src/api/users.ts `
+  --write-output docs/users-api.md `
+  --remote-chrome 127.0.0.1:9222
+```
+
+```powershell
+# Refactor code và lưu kết quả
+.\grok.ps1 -p "Refactor this to use async/await instead of callbacks" `
+  --file src/legacy/handler.js `
+  --write-output src/handler.js `
+  --remote-chrome 127.0.0.1:9222
+```
+
+### Kết hợp nhiều options
+
+```powershell
+# Think + DeepSearch + lưu file + verbose
+.\grok.ps1 -p "Analyze security vulnerabilities in this authentication code" `
+  --file src/auth/login.ts `
+  --file src/auth/middleware.ts `
+  --think `
+  --deep-search `
+  --write-output reports/security-audit.md `
+  --remote-chrome 127.0.0.1:9222 `
+  -v
+```
+
+---
+
+## Dry-run và Copy
+
+### Xem bundle trước khi gửi
+
+```powershell
+# Chỉ xem — không mở browser
+.\grok.ps1 -p "explain this" --file src/app.ts --dry-run
+```
+
+**Output:**
+```
+  Building bundle...
+  Bundle: 1 file(s), 4,925 chars (~1,231 tokens)
+
+─── Bundle ──────────────────────────────────────
+<system>
+You are Grok...
+</system>
+
+<files>
+### src/app.ts
+```typescript
+...
+```
+</files>
+
+<question>
+explain this
+</question>
+─────────────────────────────────────────────────
+  Dry-run: skipping browser launch.
+```
+
+### Copy bundle để paste thủ công
+
+```powershell
+# Build bundle và copy vào clipboard
+.\grok.ps1 -p "Review this code" --file src/app.ts --copy
+
+# Sau đó mở grok.com và Ctrl+V
+```
+
+### Render + Copy (xem và copy)
+
+```powershell
+.\grok.ps1 -p "explain this" --file src/utils.ts --render --copy --dry-run
+```
+
+---
+
+## Quản lý session
+
+Mỗi lần chạy, grok-cli tự động lưu session vào `~/.grok/sessions/` (Windows: `C:\Users\<tên>\\.grok\sessions\`).
+
+### Xem danh sách session
+
+```powershell
+# 72h gần nhất (mặc định)
+.\grok.ps1 status
+
+# 24h gần nhất
+.\grok.ps1 status --hours 24
+```
+
+**Output:**
+```
+  Recent Sessions
+
+  ✓ a1b2c3d4e5f6g7h8  2/27/2026, 10:30:15 AM  8.4s  [2 file(s)]
+    Review this codebase for potential bugs
+
+  ✓ x9y8z7w6v5u4t3s2  2/27/2026, 9:15:02 AM   12.1s [0 file(s)]
+    Explain what is a closure in JavaScript
+```
+
+### Xem chi tiết session
+
+```powershell
+# Xem response của session
+.\grok.ps1 session a1b2c3d4e5f6g7h8
+
+# Xem cả bundle đã gửi
+.\grok.ps1 session a1b2c3d4e5f6g7h8 --render-bundle
+```
+
+### Xóa session cũ
+
+```powershell
+# Xóa session cũ hơn 7 ngày (168h)
+.\grok.ps1 status --clear --hours 168
+
+# Xóa tất cả session cũ hơn 24h
+.\grok.ps1 status --clear --hours 24
+```
+
+---
+
+## Xác thực (Authentication)
+
+### Option 1 — Remote Chrome (khuyến nghị cho Windows)
+
+Mở Chrome với debug port, đăng nhập thủ công, sau đó attach:
+
+```powershell
+# Bước 1: Mở Chrome debug
+.\start-chrome-debug.ps1
+
+# Bước 2: Đăng nhập grok.com trong Chrome
+
+# Bước 3: Chạy lệnh
+.\grok.ps1 -p "your question" --remote-chrome 127.0.0.1:9222
+```
+
+### Option 2 — Manual login (tự động mở Chrome)
+
+grok-cli tự mở Chrome, bạn đăng nhập, tool tiếp tục tự động:
+
+```powershell
+# Lần đầu: đăng nhập
+.\grok.ps1 -p "your question" --manual-login --keep-browser
+
+# Lần sau: profile đã lưu, không cần đăng nhập lại
+.\grok.ps1 -p "your question" --manual-login
+```
+
+### Option 3 — Cookies file
+
+Export cookies từ Chrome và lưu vào file:
+
+1. Cài extension [EditThisCookie](https://chrome.google.com/webstore/detail/editthiscookie) hoặc [Cookie-Editor](https://cookie-editor.com/)
+2. Vào grok.com → export cookies → lưu thành `cookies.json`
+3. Copy file vào `~/.grok/cookies.json` (Windows: `C:\Users\<tên>\.grok\cookies.json`)
+
+Format file:
 ```json
 [
-  { "name": "auth_token", "value": "YOUR_TOKEN", "domain": "grok.com", "path": "/", "secure": true, "httpOnly": true },
-  { "name": "ct0", "value": "YOUR_CT0", "domain": "grok.com", "path": "/" }
+  {
+    "name": "auth_token",
+    "value": "YOUR_AUTH_TOKEN",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true
+  },
+  {
+    "name": "ct0",
+    "value": "YOUR_CT0_TOKEN",
+    "domain": ".x.com",
+    "path": "/",
+    "secure": true
+  }
 ]
 ```
 
-Then just run:
-```bash
-grok -p "explain this"
+Sau đó chạy bình thường (không cần `--remote-chrome`):
+```powershell
+.\grok.ps1 -p "your question"
 ```
 
-Or specify inline:
-```bash
-grok -p "explain this" --inline-cookies-file ~/my-cookies.json
+Hoặc chỉ định file:
+```powershell
+.\grok.ps1 -p "your question" --inline-cookies-file C:\Users\darky\my-cookies.json
 ```
 
-### Option 3 — Manual login
+### Kiểm tra cookies
 
-Opens a persistent browser profile. Log in once, reuse forever:
+```powershell
+# Kiểm tra Chrome có cookies grok.com không
+.\grok.ps1 cookies
 
-```bash
-grok -p "explain this" --manual-login --keep-browser
-# First run: log in to grok.com
-# Subsequent runs: reuses the profile at ~/.grok/browser-profile
+# Kiểm tra domain khác
+.\grok.ps1 cookies --domain x.com
 ```
 
-### Option 4 — Remote Chrome
+### Setup wizard
 
-Attach to an already-running Chrome with remote debugging:
-
-```bash
-# Start Chrome with CDP
-google-chrome --remote-debugging-port=9222
-
-# Use it
-grok -p "explain this" --remote-chrome localhost:9222
+```powershell
+.\grok.ps1 init
 ```
 
----
-
-## Commands
-
-### `grok` (default — ask a question)
-
+**Output:**
 ```
-Options:
-  -p, --prompt <text>              Prompt / question (required, or pipe via stdin)
-  -f, --file <patterns...>         Files/globs (prefix ! to exclude)
-  -m, --model <name>               Grok model [default: grok-3]
-  --copy                           Copy bundle to clipboard without browser
-  --render                         Print bundle to stdout
-  --dry-run                        Preview bundle, don't open browser
-  --keep-browser                   Keep Chrome open after run
-  --headless                       Run Chrome headless
-  --chrome-path <path>             Path to Chrome binary
-  --chrome-profile <dir>           Chrome user-data-dir
-  --cookie-path <path>             Explicit Cookies SQLite DB path
-  --inline-cookies <json>          Inline CookieParam[] JSON or base64
-  --inline-cookies-file <path>     Load cookies from JSON file
-  --grok-url <url>                 Target URL [default: https://grok.com]
-  --browser-timeout <ms>           Overall timeout [default: 120000]
-  --response-timeout <ms>          Response capture timeout [default: 300000]
-  --manual-login                   Wait for manual login in browser
-  --remote-chrome <host:port>      Attach to existing Chrome CDP
-  --write-output <path>            Write response to file
-  -v, --verbose                    Verbose logging
-```
+  Setup Check
 
-### `grok status`
+  ✓ Chrome profile found: C:\Users\darky\AppData\Local\Google\Chrome\...
+  ✓ C:\Users\darky\.grok exists
+  ℹ  No cookies.json — optional: export cookies here for inline mode
 
-```bash
-grok status              # list last 72h of sessions
-grok status --hours 24   # last 24h
-grok status --clear      # delete old sessions
-```
+  Quick Start
 
-### `grok session <id>`
+  Option 1 — Use existing Chrome session:
+    .\grok.ps1 -p "your question" --remote-chrome 127.0.0.1:9222
 
-```bash
-grok session abc123def      # show session details + response
-grok session abc123def --render-bundle  # also print the bundle used
-```
-
-### `grok cookies`
-
-```bash
-grok cookies                  # check grok.com cookies in default Chrome profile
-grok cookies --domain x.com   # different domain
-```
-
-### `grok init`
-
-```bash
-grok init   # setup check + quick start guide
+  Option 2 — Manual login:
+    .\grok.ps1 -p "your question" --manual-login
 ```
 
 ---
 
-## Examples
+## Captcha & Bot Detection
 
-```bash
-# Review TypeScript files
-grok -p "Find potential bugs and type safety issues" \
-  --file "src/**/*.ts" --file "!src/**/*.test.ts"
+grok.com chạy trên X.com infrastructure với nhiều lớp bảo vệ:
 
-# Explain a specific file
-grok -p "Walk me through what this component does" --file src/components/Auth.tsx
+| Challenge | Cách xử lý |
+|-----------|------------|
+| **Cloudflare JS** ("Just a moment...") | Tự động đợi 30s. Nếu không qua → tool dừng, bạn solve trong browser, Enter để tiếp tục |
+| **Cloudflare Turnstile** | Tương tự — thường tự qua với Chrome thật |
+| **Arkose FunCaptcha** (login X.com) | Tool dừng, hướng dẫn bạn solve puzzle trong browser, Enter để tiếp |
+| **reCAPTCHA / hCaptcha** | Dừng + chờ bạn solve |
+| **Login wall** (redirect đến x.com/login) | Báo lỗi rõ ràng — cookies hết hạn |
 
-# Fix a bug (pipe error message)
-echo "TypeError: Cannot read properties of undefined (reading 'map')" | \
-  grok -p "Fix this error" --file src/pages/index.tsx
+### Tips tránh bị chặn
 
-# Multi-file architecture question
-grok -p "How does the auth flow work end to end?" \
-  --file src/middleware/auth.ts \
-  --file src/pages/api/login.ts \
-  --file src/hooks/useAuth.ts
+```powershell
+# Dùng Chrome profile thật (có lịch sử duyệt web)
+.\grok.ps1 -p "question" --chrome-profile "C:\Users\darky\AppData\Local\Google\Chrome\User Data\Default"
 
-# Write output to file
-grok -p "Generate unit tests for this" --file src/utils.ts --write-output tests/utils.test.ts
+# Không dùng --headless (Cloudflare detect headless rất dễ)
+# ❌ Sai:  .\grok.ps1 -p "question" --headless
+# ✅ Đúng: .\grok.ps1 -p "question"  (không có --headless)
+
+# Nếu hay bị Cloudflare: dùng remote Chrome đã có cookies CF
+.\start-chrome-debug.ps1
+.\grok.ps1 -p "question" --remote-chrome 127.0.0.1:9222
+```
+
+---
+
+## Tất cả flags
+
+### Flags chính
+
+| Flag | Viết tắt | Mặc định | Mô tả |
+|------|----------|----------|-------|
+| `--prompt <text>` | `-p` | — | Câu hỏi gửi Grok (bắt buộc) |
+| `--file <patterns...>` | `-f` | — | File hoặc glob pattern (dùng `!` để exclude) |
+| `--model <name>` | `-m` | `grok-3` | Model Grok |
+| `--remote-chrome <host:port>` | — | — | Attach Chrome đang chạy qua CDP |
+| `--write-output <path>` | — | — | Lưu response ra file |
+| `--verbose` | `-v` | false | Log chi tiết |
+
+### Mode flags
+
+| Flag | Mô tả |
+|------|-------|
+| `--think` | Bật Think mode — suy luận sâu hơn |
+| `--deep-search` | Bật DeepSearch — tìm web trước khi trả lời |
+| `--imagine <file>` | Tạo ảnh từ prompt, lưu PNG/JPG |
+| `--read-aloud <file>` | Click Read Aloud, lưu audio URL/MP3 |
+
+### Browser flags
+
+| Flag | Mặc định | Mô tả |
+|------|----------|-------|
+| `--manual-login` | false | Mở browser, chờ đăng nhập thủ công |
+| `--keep-browser` | false | Giữ Chrome mở sau khi xong |
+| `--headless` | false | Chạy Chrome ẩn (không nên dùng) |
+| `--chrome-path <path>` | auto | Đường dẫn Chrome binary |
+| `--chrome-profile <dir>` | — | Chrome user-data-dir |
+| `--browser-timeout <ms>` | `120000` | Timeout tổng (2 phút) |
+| `--response-timeout <ms>` | `300000` | Timeout đợi response (5 phút) |
+
+### Cookie flags
+
+| Flag | Mô tả |
+|------|-------|
+| `--cookie-path <path>` | Đường dẫn trực tiếp đến Chrome Cookies SQLite |
+| `--inline-cookies <json>` | JSON array CookieParam[] hoặc base64 |
+| `--inline-cookies-file <path>` | Load cookies từ file JSON |
+
+### Preview flags
+
+| Flag | Mô tả |
+|------|-------|
+| `--dry-run` | Xem bundle, không mở browser |
+| `--render` | In bundle ra stdout |
+| `--copy` | Copy bundle vào clipboard |
+
+---
+
+## Troubleshooting
+
+### `error: unknown option '--remote-chrome'`
+
+Đang dùng nhầm lệnh `grok`. Dùng wrapper script:
+```powershell
+# Windows
+.\grok.ps1 -p "question" --remote-chrome 127.0.0.1:9222
+
+# macOS/Linux (sau npm link)
+grok -p "question" --remote-chrome 127.0.0.1:9222
+```
+
+### `Error: connect ECONNREFUSED 127.0.0.1:9222`
+
+Chrome chưa mở debug port:
+```powershell
+# Kiểm tra
+netstat -ano | findstr :9222
+# Phải thấy LISTENING
+
+# Nếu không có → chạy lại
+.\start-chrome-debug.ps1
+```
+
+### Waiting for Grok response... mãi không xong
+
+Tool đang poll DOM nhưng không tìm thấy response. Chạy với `-v` để xem DOM hints:
+```powershell
+.\grok.ps1 -p "Say hello" --remote-chrome 127.0.0.1:9222 -v
+```
+
+Sau 10s sẽ thấy:
+```
+[browser] DOM hint:
+DIV[class="response-content..."] = "Hello! How can I help..."
+```
+
+Copy class name đó và [mở issue](https://github.com/Fon-1/grok-cli/issues) để update selector.
+
+### Redirected to login page
+
+Cookies hết hạn hoặc không tìm thấy:
+```powershell
+# Kiểm tra cookies
+.\grok.ps1 cookies
+
+# Fix: dùng remote Chrome đã đăng nhập
+.\start-chrome-debug.ps1   # mở Chrome
+# Đăng nhập grok.com trong Chrome
+.\grok.ps1 -p "question" --remote-chrome 127.0.0.1:9222
+```
+
+### Cloudflare challenge không tự qua
+
+```powershell
+# Không dùng --headless
+# Dùng Chrome profile thật
+.\grok.ps1 -p "question" `
+  --chrome-profile "$env:LOCALAPPDATA\Google\Chrome\User Data\Default" `
+  --remote-chrome 127.0.0.1:9222
+```
+
+### Build lỗi
+
+```powershell
+# Xóa dist và build lại
+Remove-Item -Recurse -Force dist
+npm run build
 ```
 
 ---
 
 ## Sessions
 
-Sessions are stored in `~/.grok/sessions/` as JSON files.
+Tất cả session lưu tại `~/.grok/sessions/` (Windows: `C:\Users\<tên>\.grok\sessions\`).
 
-```bash
-ls ~/.grok/sessions/
-grok status           # list recent sessions
-grok session <id>     # view a session's response
+```powershell
+# Xem sessions gần đây
+.\grok.ps1 status
+
+# Xem 1 session cụ thể
+.\grok.ps1 session <id>
+
+# Xem bundle đã gửi trong session đó
+.\grok.ps1 session <id> --render-bundle
+
+# Xóa sessions cũ
+.\grok.ps1 status --clear --hours 168
 ```
 
-Override the home dir:
-```bash
-GROK_HOME_DIR=/tmp/grok-test grok -p "test"
+Override thư mục lưu:
+```powershell
+$env:GROK_HOME_DIR = "D:\grok-data"
+.\grok.ps1 -p "question"
 ```
-
----
-
-## Captcha & Bot Detection Handling
-
-grok.com runs on X.com infrastructure which has multiple layers of bot protection:
-
-| Challenge | What happens |
-|-----------|-------------|
-| **Cloudflare JS challenge** ("Just a moment...") | Tool waits up to 30s for auto-pass. With stealth patches + non-headless Chrome, this usually passes automatically. |
-| **Cloudflare Turnstile** | Same — usually auto-passes in a real Chrome window. |
-| **Arkose FunCaptcha** (X.com login) | Tool pauses, prints instructions, waits for you to solve it in the browser window, then continues. |
-| **reCAPTCHA / hCaptcha** | Same pause-and-wait approach. |
-| **Login wall** (redirected to x.com/login) | Tool exits with clear error — cookies are missing or expired. |
-
-**Key insight: don't automate login.** X.com's login flow uses Arkose FunCaptcha + aggressive TLS/behavioral fingerprinting that's extremely hard to bypass programmatically. The right approach is to use an **already-authenticated session** (cookies from an existing Chrome session).
-
-### Tips to avoid challenges
-
-1. **Use non-headless mode** (default) — headless Chrome is much easier for Cloudflare to detect
-2. **Keep cookies fresh** — expired `auth_token` / `ct0` triggers login redirect
-3. **Use your real Chrome profile** (`--chrome-profile`) — Cloudflare trusts browsers with history
-4. **Don't run too frequently** — rate limiting triggers more challenges
-
-### If you keep hitting Cloudflare
-
-```bash
-# Use your actual Chrome profile (already has CF clearance cookies)
-grok -p "your question" --chrome-profile ~/.config/google-chrome/Default
-
-# Or: manual login mode — log in once, reuse forever
-grok -p "your question" --manual-login --keep-browser
-```
-
-## Notes
-
-- The UI automation uses DOM selectors that may need updating if grok.com changes its layout. File an issue if things break.
-- **Avoid `--headless`** — Cloudflare detects headless browsers and will show challenges more often.
-- On macOS, encrypted Chrome cookies are decrypted automatically via Keychain (`Chrome Safe Storage`).
-- On Linux, cookies may be stored unencrypted or with GNOME Keyring / KWallet — if decryption fails, use `--inline-cookies-file` or `--manual-login`.
-- On Windows, Chrome uses DPAPI app-bound encryption — use `--manual-login` or `--inline-cookies-file`.
 
 ---
 
